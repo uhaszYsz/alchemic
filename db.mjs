@@ -19,6 +19,20 @@ function migrateItemsIconPath(db) {
     }
 }
 
+function migrateItemsDiscoveredBy(db) {
+    const cols = db.prepare('PRAGMA table_info(items)').all();
+    if (!cols.some((c) => c.name === 'discovered_by')) {
+        db.exec('ALTER TABLE items ADD COLUMN discovered_by INTEGER');
+    }
+}
+
+function migrateItemsDiscoveredAt(db) {
+    const cols = db.prepare('PRAGMA table_info(items)').all();
+    if (!cols.some((c) => c.name === 'discovered_at')) {
+        db.exec("ALTER TABLE items ADD COLUMN discovered_at TEXT");
+    }
+}
+
 export function openDb() {
     const db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
@@ -28,7 +42,9 @@ export function openDb() {
             emoji TEXT NOT NULL,
             name TEXT NOT NULL,
             ingredient_a TEXT,
-            ingredient_b TEXT
+            ingredient_b TEXT,
+            discovered_by INTEGER,
+            discovered_at TEXT
         );
         CREATE TABLE IF NOT EXISTS rejectedCrafts (
             item_a_id TEXT NOT NULL,
@@ -59,6 +75,8 @@ export function openDb() {
         );
     `);
     migrateItemsIconPath(db);
+    migrateItemsDiscoveredBy(db);
+    migrateItemsDiscoveredAt(db);
     const n = db.prepare('SELECT COUNT(*) AS c FROM items').get().c;
     if (n === 0) {
         const ins = db.prepare(
@@ -74,11 +92,11 @@ export function openDb() {
     return db;
 }
 
-/** @returns {Record<string, { emoji: string, name: string, a?: string, b?: string, iconPath?: string }>} */
+/** @returns {Record<string, { emoji: string, name: string, a?: string, b?: string, iconPath?: string, discoveredBy?: number, discoveredAt?: string }>} */
 export function getItemsMap(db) {
     const rows = db
         .prepare(
-            'SELECT id, emoji, name, ingredient_a AS a, ingredient_b AS b, icon_path FROM items ORDER BY id'
+            'SELECT id, emoji, name, ingredient_a AS a, ingredient_b AS b, icon_path, discovered_by, discovered_at FROM items ORDER BY id'
         )
         .all();
     const out = {};
@@ -91,6 +109,12 @@ export function getItemsMap(db) {
         if (row.icon_path != null && row.icon_path !== '') {
             entry.iconPath = row.icon_path;
         }
+        if (row.discovered_by != null) {
+            entry.discoveredBy = Number(row.discovered_by);
+        }
+        if (row.discovered_at != null && row.discovered_at !== '') {
+            entry.discoveredAt = String(row.discovered_at);
+        }
         out[row.id] = entry;
     }
     return out;
@@ -99,19 +123,29 @@ export function getItemsMap(db) {
 /**
  * Insert or update a catalog item (discoveries). Preserves existing icon_path when not provided.
  * @param {import('better-sqlite3').Database} db
- * @param {{ id: string, emoji: string, name: string, ingredient_a: string, ingredient_b: string }} row
+ * @param {{ id: string, emoji: string, name: string, ingredient_a: string, ingredient_b: string, discovered_by?: number | null, discovered_at?: string | null }} row
  */
 export function upsertItem(db, row) {
-    const { id, emoji, name, ingredient_a, ingredient_b } = row;
+    const { id, emoji, name, ingredient_a, ingredient_b, discovered_by, discovered_at } = row;
     db.prepare(
-        `INSERT INTO items (id, emoji, name, ingredient_a, ingredient_b)
-         VALUES (@id, @emoji, @name, @ingredient_a, @ingredient_b)
+        `INSERT INTO items (id, emoji, name, ingredient_a, ingredient_b, discovered_by, discovered_at)
+         VALUES (@id, @emoji, @name, @ingredient_a, @ingredient_b, @discovered_by, @discovered_at)
          ON CONFLICT(id) DO UPDATE SET
            emoji = excluded.emoji,
            name = excluded.name,
            ingredient_a = excluded.ingredient_a,
-           ingredient_b = excluded.ingredient_b`
-    ).run({ id, emoji, name, ingredient_a, ingredient_b });
+           ingredient_b = excluded.ingredient_b,
+           discovered_by = COALESCE(items.discovered_by, excluded.discovered_by),
+           discovered_at = COALESCE(items.discovered_at, excluded.discovered_at)`
+    ).run({
+        id,
+        emoji,
+        name,
+        ingredient_a,
+        ingredient_b,
+        discovered_by: discovered_by ?? null,
+        discovered_at: discovered_at ?? null
+    });
 }
 
 /**

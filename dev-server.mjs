@@ -744,6 +744,8 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.method === 'POST' && pathOnly === '/api/items/upsert') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
         readRequestBody(req)
             .then((raw) => {
                 const body = parseBody(raw);
@@ -759,7 +761,9 @@ const server = http.createServer((req, res) => {
                     emoji: emoji || '✨',
                     name,
                     ingredient_a: ingredient_a || '',
-                    ingredient_b: ingredient_b || ''
+                    ingredient_b: ingredient_b || '',
+                    discovered_by: auth.userId,
+                    discovered_at: new Date().toISOString()
                 });
                 recipeIndex = buildRecipeIndex(getItemsMap(db));
                 res.writeHead(204, CORS_API);
