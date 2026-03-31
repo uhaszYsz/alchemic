@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "build:css": "tailwindcss -i ./src/tailwind-input.css -o ./public/styles.css --minify",
-    "prestart": "npm run build:css",
     "start": "node dev-server.mjs"
   },
   "devDependencies": {
