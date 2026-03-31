@@ -22,9 +22,18 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3456;
-const OPENAI_KEY_HARDCODED =
-    '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';
-const OPENAI_KEY = String(process.env.OPENAI_API_KEY || OPENAI_KEY_HARDCODED || '').trim();
+const OPENAI_KEY_FILE = path.join(__dirname, 'key.txt');
+
+function readOpenAiKeyFromFile() {
+    try {
+        const raw = fs.readFileSync(OPENAI_KEY_FILE, 'utf8');
+        return String(raw || '').trim();
+    } catch {
+        return '';
+    }
+}
+
+const OPENAI_KEY = readOpenAiKeyFromFile() || String(process.env.OPENAI_API_KEY || '').trim();
 const SESSION_TTL_DAYS = 30;
 const FACTORY_GRID_BASE = 8;
 const FACTORY_LOOP_MS_DEFAULT = 500;

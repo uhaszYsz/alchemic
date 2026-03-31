@@ -14,7 +14,7 @@ const state = {
     activeElements: [],
     draggedItem: null,
     pendingCombination: null,
-    /** @type {string[]} last AI suggestions — plain name strings only (no emoji in UI) */
+    /** @type {{ name: string, emoji: string }[]} last AI suggestions (emoji + name) */
     aiSuggestions: [],
     /** Chosen discovery name (must be one of aiSuggestions); no free typing */
     discoverySelectedName: '',
@@ -102,8 +102,8 @@ function emojiForItemId(id) {
 }
 
 function useLocalProxy() {
-    const h = typeof window !== 'undefined' ? window.location.hostname : '';
-    return h === 'localhost' || h === '127.0.0.1';
+    // Always route OpenAI requests through our backend API so browser-side keys are never required.
+    return true;
 }
 
 /** Backend that serves `/api/items`, `/api/chat`, and `/api/images` (defaults to same origin as the page). */
@@ -378,9 +378,19 @@ function explanationFromDiscoveryJson(obj) {
     return stripEmojiClusters(String(ex ?? '').trim());
 }
 
+/** @param {string} raw */
+function normalizeSuggestionEmoji(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    const m = s.match(
+        /(?:\p{Extended_Pictographic}(?:\u200D\p{Extended_Pictographic})*[\uFE0F\u{1F3FB}-\u{1F3FF}]?)/u
+    );
+    return m ? m[0] : '';
+}
+
 /**
  * @param {Record<string, unknown>} obj
- * @returns {string[]}
+ * @returns {{ name: string, emoji: string }[]}
  */
 function propositionsFromDiscoveryJson(obj) {
     const ms =
@@ -391,13 +401,31 @@ function propositionsFromDiscoveryJson(obj) {
     const out = [];
     const seen = new Set();
     for (const p of props) {
-        const raw = stripEmojiClusters(String(p ?? '').trim());
+        let rawName = '';
+        let rawEmoji = '';
+        if (typeof p === 'string') {
+            const raw = String(p || '').trim();
+            rawName = stripEmojiClusters(raw);
+            rawEmoji = normalizeSuggestionEmoji(raw);
+        } else if (p && typeof p === 'object') {
+            rawName = String(p.name ?? '').trim();
+            rawEmoji = String(p.emoji ?? '').trim();
+            if (!rawName && typeof p.label === 'string') {
+                const raw = String(p.label || '').trim();
+                rawName = stripEmojiClusters(raw);
+                if (!rawEmoji) rawEmoji = normalizeSuggestionEmoji(raw);
+            }
+        } else {
+            rawName = String(p ?? '').trim();
+        }
+        const raw = stripEmojiClusters(rawName);
         const name = raw.split(/\s+/).filter(Boolean)[0] ?? '';
         if (!name) continue;
         const key = name.toLowerCase();
         if (seen.has(key)) continue;
         seen.add(key);
-        out.push(name);
+        const emoji = normalizeSuggestionEmoji(rawEmoji) || '✨';
+        out.push({ name, emoji });
         if (out.length >= 6) break;
     }
     return out;
@@ -405,7 +433,7 @@ function propositionsFromDiscoveryJson(obj) {
 
 /**
  * @param {string | undefined} content
- * @returns {{ suggestions: string[], explanation: string, makesenceYes: boolean | null }}
+ * @returns {{ suggestions: { name: string, emoji: string }[], explanation: string, makesenceYes: boolean | null }}
  */
 function parseAiDiscoveryReply(content) {
     const raw = String(content || '').trim();
@@ -460,15 +488,23 @@ function composeAiDiscoveryRequest(itemA, itemB) {
         `Give exactly six name ideas for an element-combining game like Little Alchemy\n\n` +
         `Combine "${itemName1}" and "${itemName2}" with a coherent imaginative style.\n\n` +
         `Each proposition must be exactly one word: no spaces, no phrases (use compounds or hyphens if needed, e.g. Sunstone or Red-hot).\n\n` +
+        `Each proposition must include a fitting emoji.\n\n` +
         `Reply in JSON only (no markdown fences, no text outside the object):\n` +
         `{\n` +
         `  "explanation": "Short optional note (e.g. theme of the names).",\n` +
-        `  "propositions": ["Mud", "Clay", "Brick", "Loam", "Silt", "Peat"]\n` +
+        `  "propositions": [\n` +
+        `    { "name": "Mud", "emoji": "🟤" },\n` +
+        `    { "name": "Clay", "emoji": "🧱" },\n` +
+        `    { "name": "Brick", "emoji": "🧱" },\n` +
+        `    { "name": "Loam", "emoji": "🌱" },\n` +
+        `    { "name": "Silt", "emoji": "🌫️" },\n` +
+        `    { "name": "Peat", "emoji": "🪵" }\n` +
+        `  ]\n` +
         `}\n\n` +
-        `propositions must be exactly six distinct, non-empty strings; each string is a single word only.`;
+        `propositions must be exactly six distinct entries; each entry must have "name" (single word) and "emoji" (one fitting emoji).`;
 
     const systemContent =
-        'Reply with a single valid JSON object only. Keys: explanation (string), propositions (array of exactly six non-empty distinct single-word strings — one word each, no spaces). No verdict or boolean about validity.';
+        'Reply with a single valid JSON object only. Keys: explanation (string), propositions (array of exactly six objects: { name, emoji }). name must be one word only (no spaces). emoji must be a fitting emoji. No verdict or boolean about validity.';
 
     return {
         userPrompt,
@@ -1212,7 +1248,7 @@ function hideDiscoveryCheckModal() {
 
 /**
  * Apply parsed AI discovery reply to the discovery modal UI.
- * @param {{ suggestions: string[], explanation: string, makesenceYes: boolean | null }} parsed
+ * @param {{ suggestions: { name: string, emoji: string }[], explanation: string, makesenceYes: boolean | null }} parsed
  */
 function applyDiscoveryAiResult(parsed) {
     state.aiSuggestions = parsed.suggestions;
@@ -1372,7 +1408,8 @@ async function saveDiscoveryAndStartIcon() {
     const pending = state.pendingCombination;
     if (!pending) return;
 
-    const icon = '✨';
+    const chosen = state.aiSuggestions.find((s) => s && s.name === text);
+    const icon = chosen && typeof chosen.emoji === 'string' ? chosen.emoji : '✨';
     const id = slugFromNameText(text);
     const newElement = { id, emoji: icon, name: text };
     const ingA = pending.a.id;
@@ -1494,7 +1531,7 @@ function syncDiscoverySelectedNameUi() {
 
 function isDiscoveryNameAllowed(name) {
     const n = String(name || '').trim();
-    return n && state.aiSuggestions.some((s) => s === n);
+    return n && state.aiSuggestions.some((s) => s && s.name === n);
 }
 
 function updateDiscoverySaveButton() {
@@ -1515,8 +1552,11 @@ function renderAiSuggestions() {
     aiSuggestionsEl.innerHTML = '';
     const chosen = getDiscoveryChosenName();
     state.aiSuggestions.forEach((prop) => {
-        const already = suggestionAlreadyInLibrary(prop);
-        const selected = chosen && prop === chosen;
+        const propName = prop && typeof prop.name === 'string' ? prop.name : '';
+        const propEmoji = prop && typeof prop.emoji === 'string' ? prop.emoji : '';
+        if (!propName) return;
+        const already = suggestionAlreadyInLibrary(propName);
+        const selected = chosen && propName === chosen;
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.disabled = already;
@@ -1527,14 +1567,19 @@ function renderAiSuggestions() {
                 : selected
                   ? 'bg-slate-800 border-blue-500 ring-1 ring-blue-400/50 hover:bg-slate-800'
                   : 'bg-slate-900/80 border-slate-600 hover:border-blue-500 hover:bg-slate-800');
+        const emojiSpan = document.createElement('span');
+        emojiSpan.className = 'text-lg leading-none select-none shrink-0 mt-0.5';
+        emojiSpan.setAttribute('aria-hidden', 'true');
+        emojiSpan.textContent = propEmoji || '✨';
         const nameSpan = document.createElement('span');
         nameSpan.className =
             'text-slate-200 flex-1 min-w-0 whitespace-normal break-words text-left leading-snug';
-        nameSpan.textContent = prop;
+        nameSpan.textContent = propName;
+        btn.appendChild(emojiSpan);
         btn.appendChild(nameSpan);
         btn.addEventListener('click', () => {
             if (already) return;
-            setDiscoverySelectedName(prop);
+            setDiscoverySelectedName(propName);
         });
         aiSuggestionsEl.appendChild(btn);
     });
@@ -2795,7 +2840,7 @@ async function combineAsync(a, b) {
  * @param {unknown} a
  * @param {unknown} b
  * @param {string} comboKey
- * @param {{ suggestions: string[], explanation: string, makesenceYes: boolean | null } | undefined} preloadedParsed
+ * @param {{ suggestions: { name: string, emoji: string }[], explanation: string, makesenceYes: boolean | null } | undefined} preloadedParsed
  */
 function openDiscoveryModal(a, b, comboKey, preloadedParsed) {
     state.discoveryIconItemName = '';
