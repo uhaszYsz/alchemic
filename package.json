@@ -1,0 +1,16 @@
+{
+  "name": "alchemic",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/tailwind-input.css -o ./public/styles.css --minify",
+    "prestart": "npm run build:css",
+    "start": "node dev-server.mjs"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1"
+  }
+}

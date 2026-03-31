@@ -1,0 +1,3293 @@
+// Game State: items and recipes from SQLite via GET /api/items; discoveries sync with POST /api/items/upsert.
+// No localStorage — inventory is session memory only.
+/** Base factory width/height before size upgrades */
+const FACTORY_GRID_BASE = 8;
+/** Default tick interval; Speed +1 multiplies current interval by 0.9 (−10%) */
+const FACTORY_LOOP_MS_DEFAULT = 500;
+const MIN_FACTORY_LOOP_MS = 33;
+/** Max Size +1 presses; each adds one row/col on every side (grid side = BASE + 2×level) */
+const MAX_FACTORY_SIZE_LEVEL = 10;
+
+const state = {
+    library: [],
+    recipes: {},
+    activeElements: [],
+    draggedItem: null,
+    pendingCombination: null,
+    /** @type {string[]} last AI suggestions — plain name strings only (no emoji in UI) */
+    aiSuggestions: [],
+    /** Chosen discovery name (must be one of aiSuggestions); no free typing */
+    discoverySelectedName: '',
+    /** 'lab' | 'factory' */
+    activeWorkspace: 'lab',
+    /** Crafted / factory output counts; separate from the discovery library. */
+    playerInventory: {},
+    factory: {
+        /** @type {Record<string, 'transporter' | 'extractor' | 'combiner' | 'storage'>} key "col,row" */
+        placements: {},
+        /** @type {null | 'transporter' | 'extractor' | 'combiner' | 'storage'} */
+        selectedBuilding: null,
+        /**
+         * Optional resource deposits on inner cells (item id, e.g. wood, water).
+         * Used for extractor rules and future mechanics. Corners are not stored here.
+         * @type {Record<string, string>}
+         */
+        cellResources: {},
+        /** Transporter flow: 0 = up, 1 = right, 2 = down, 3 = left (➡ + rotate offset in UI) */
+        transporterDirs: {},
+        /** 0 = BASE×BASE; each +1 adds a border row/col on all four sides (placements shift inward) */
+        sizeUpgradeLevel: 0,
+        /** Factory simulation loop interval (ms); Speed +1 → round(current × 0.9) */
+        loopMs: FACTORY_LOOP_MS_DEFAULT,
+        /** Increments each factory loop tick (for future sim / UI) */
+        loopTick: 0,
+        /** Items on floor/belts: key "col,row" → item id (wood, crafted ids, …) */
+        cellItems: {},
+        /** performance.now() until which sim tick pulse is drawn on the factory canvas */
+        loopPulseUntil: 0,
+        /** Combiner output direction: 0 up, 1 right, 2 down, 3 left */
+        combinerDirs: {},
+        /** Unknown recipe at combiner: key → { a: id, b: id, comboKey } */
+        combinerDiscovery: {},
+        /** When discovery modal opened from factory combiner, cell key to resolve on save */
+        factoryDiscoveryCombinerKey: null,
+        /** Smooth belt moves: dest key → { fromKey, startT, durMs } (durMs = factory loop interval) */
+        itemSlides: {},
+        /** While dragging to place transporters: cells (filtered) for preview overlay */
+        beltDragPreview: /** @type {null | { col: number, row: number }[]} */ (null),
+        /** Combiner cell key → performance.now() until red "rejected combo" flash ends */
+        cellRejectFlashUntil: /** @type {Record<string, number>} */ ({}),
+        /** Camera center in world cell-space (cell center coordinates). */
+        cameraX: (FACTORY_GRID_BASE - 1) / 2,
+        cameraY: (FACTORY_GRID_BASE - 1) / 2,
+        /** Camera zoom multiplier (1 = default). */
+        cameraZoom: 1
+    },
+    /** Last OpenAI image URL in discovery modal (before saving to disk) */
+    discoveryPreviewUrl: '',
+    /** Item id for which we are generating / saving an icon */
+    discoveryIconItemId: '',
+    /** Filled when moving to icon step — for image prompt (name was cleared from picker state) */
+    discoveryIconItemName: '',
+    auth: {
+        token: '',
+        username: '',
+        factorySyncTimerId: null,
+        enteringFactory: false
+    }
+};
+
+/** Base catalog from DB (merged with live combo index for tier calculation). */
+let cachedBaseItemsMap = null;
+
+/** @returns {{ id: string, emoji: string, name: string } | null} */
+function normalizeRecipeResult(val) {
+    if (!val || typeof val.id !== 'string') return null;
+    if (typeof val.emoji === 'string' && typeof val.name === 'string') {
+        return { id: val.id, emoji: val.emoji.trim(), name: val.name.trim() };
+    }
+    if (typeof val.name === 'string') {
+        const { icon, text } = splitLabel(val.name);
+        return { id: val.id, emoji: icon, name: text };
+    }
+    return null;
+}
+
+function emojiForItemId(id) {
+    const item = state.library.find((e) => e.id === id);
+    if (!item) return '';
+    if (typeof item.emoji === 'string') return item.emoji;
+    const { icon } = splitLabel(item.name);
+    return icon;
+}
+
+function useLocalProxy() {
+    const h = typeof window !== 'undefined' ? window.location.hostname : '';
+    return h === 'localhost' || h === '127.0.0.1';
+}
+
+/** Backend that serves `/api/items`, `/api/chat`, and `/api/images` (defaults to same origin as the page). */
+function apiOrigin() {
+    const raw = typeof window !== 'undefined' && window.ALCHEMIC_API_BASE;
+    if (typeof raw === 'string' && raw.trim()) {
+        return raw.trim().replace(/\/$/, '');
+    }
+    return typeof window !== 'undefined' ? window.location.origin : '';
+}
+
+function authHeaders(headers) {
+    const out = { ...(headers || {}) };
+    if (state.auth.token) out.Authorization = `Bearer ${state.auth.token}`;
+    return out;
+}
+
+async function apiFetch(path, options) {
+    const url = `${apiOrigin()}${path}`;
+    const opts = { ...(options || {}) };
+    opts.headers = authHeaders(opts.headers || {});
+    return fetch(url, opts);
+}
+
+async function fetchChatCompletions(body) {
+    const useProxy = useLocalProxy();
+    const url = useProxy
+        ? `${apiOrigin()}/api/chat`
+        : 'https://api.openai.com/v1/chat/completions';
+    const headers = { 'Content-Type': 'application/json' };
+    if (!useProxy) {
+        const key = typeof window !== 'undefined' && window.ALCHEMIC_OPENAI_KEY;
+        if (!key) {
+            throw new Error(
+                'Set window.ALCHEMIC_OPENAI_KEY in config.js, or use localhost with ALCHEMIC_API_BASE pointing at node dev-server (npm start)'
+            );
+        }
+        headers.Authorization = `Bearer ${key}`;
+    }
+    const authAwareHeaders = useProxy ? authHeaders(headers) : headers;
+    const res = await fetch(url, { method: 'POST', headers: authAwareHeaders, body: JSON.stringify(body) });
+    if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `${res.status} ${res.statusText}`);
+    }
+    return res.json();
+}
+
+/**
+ * OpenAI Images API (DALL·E). Use small `size` with `dall-e-2` for icons.
+ * @param {{ model?: string, prompt: string, n?: number, size?: string, response_format?: string }} body
+ */
+async function fetchImageGenerations(body) {
+    const useProxy = useLocalProxy();
+    const url = useProxy
+        ? `${apiOrigin()}/api/images`
+        : 'https://api.openai.com/v1/images/generations';
+    const headers = { 'Content-Type': 'application/json' };
+    if (!useProxy) {
+        const key = typeof window !== 'undefined' && window.ALCHEMIC_OPENAI_KEY;
+        if (!key) {
+            throw new Error(
+                'Set window.ALCHEMIC_OPENAI_KEY in config.js, or use localhost with ALCHEMIC_API_BASE pointing at node dev-server (npm start)'
+            );
+        }
+        headers.Authorization = `Bearer ${key}`;
+    }
+    const authAwareHeaders = useProxy ? authHeaders(headers) : headers;
+    const res = await fetch(url, { method: 'POST', headers: authAwareHeaders, body: JSON.stringify(body) });
+    if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `${res.status} ${res.statusText}`);
+    }
+    return res.json();
+}
+
+/**
+ * Sync discovered item to SQLite (dev-server). Safe no-op on failure.
+ * @param {{ id: string, emoji: string, name: string, ingredient_a: string, ingredient_b: string }} payload
+ */
+async function postItemUpsertRemote(payload) {
+    try {
+        const r = await apiFetch('/api/items/upsert', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!r.ok && r.status !== 204) {
+            console.warn('postItemUpsertRemote', r.status, await r.text());
+        }
+    } catch (e) {
+        console.warn('postItemUpsertRemote', e);
+    }
+}
+
+/**
+ * Download image to server `images/` and set `icon_path` in DB.
+ * @param {string} id
+ * @param {string} imageUrl
+ * @param {{ strictUserUrl?: boolean }} [opts] If strictUserUrl, server accepts only JPEG/PNG/GIF and ≤16 KB.
+ * @returns {Promise<{ iconPath: string }>}
+ */
+async function postSaveItemIconRemote(id, imageUrl, opts) {
+    const payload = { id, imageUrl };
+    if (opts && opts.strictUserUrl) payload.strictUserUrl = true;
+    const r = await apiFetch('/api/items/icon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    return /** @type {{ iconPath: string }} */ (JSON.parse(t));
+}
+
+/** Merge icon paths from GET /api/items into `state.library` and `cachedBaseItemsMap`. */
+async function reloadCatalogFromApi() {
+    try {
+        const res = await apiFetch('/api/items');
+        if (!res.ok) return;
+        const payload = await res.json();
+        const items = payload && typeof payload.items === 'object' && payload.items !== null ? payload.items : null;
+        if (!items) return;
+        cachedBaseItemsMap = items;
+        for (const it of state.library) {
+            const d = items[it.id];
+            if (d && typeof d.iconPath === 'string' && d.iconPath.trim()) {
+                it.iconPath = d.iconPath.trim();
+            }
+        }
+        recomputeAllTiers();
+        renderLibrary();
+    } catch (e) {
+        console.warn('reloadCatalogFromApi', e);
+    }
+}
+
+/** @param {{ iconPath?: string }} item */
+function iconSrcForItem(item) {
+    if (!item || typeof item.iconPath !== 'string' || !item.iconPath.trim()) return null;
+    return `${apiOrigin()}/${item.iconPath.replace(/^\/+/, '')}`;
+}
+
+/** @param {string} id @param {string} iconPath */
+function persistIconPathForItem(id, iconPath) {
+    const li = state.library.findIndex((e) => e.id === id);
+    if (li >= 0) {
+        state.library[li] = { ...state.library[li], iconPath };
+    }
+    if (cachedBaseItemsMap && cachedBaseItemsMap[id]) {
+        cachedBaseItemsMap[id] = { ...cachedBaseItemsMap[id], iconPath };
+    }
+}
+
+/** Remove emoji / pictograph clusters (ZWJ sequences, skin tones) for display and storage. */
+function stripEmojiClusters(s) {
+    const t = typeof s === 'string' ? s : '';
+    return t
+        .replace(
+            /(?:\p{Extended_Pictographic}(?:\u200D\p{Extended_Pictographic})*[\uFE0F\u{1F3FB}-\u{1F3FF}]?)/gu,
+            ''
+        )
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * Pull JSON object from assistant reply (strips optional ```json fences; uses first {...} span).
+ * @param {string} raw
+ * @returns {Record<string, unknown> | null}
+ */
+function extractJsonObjectFromAiReply(raw) {
+    let s = String(raw || '').trim();
+    if (!s) return null;
+    const fenceMatch = s.match(/```(?:json)?\s*\n?/i);
+    if (fenceMatch && fenceMatch.index !== undefined) {
+        const after = s.slice(fenceMatch.index + fenceMatch[0].length);
+        const close = after.indexOf('```');
+        if (close !== -1) s = after.slice(0, close).trim();
+    }
+    const start = s.indexOf('{');
+    const end = s.lastIndexOf('}');
+    if (start === -1 || end <= start) return null;
+    s = s.slice(start, end + 1);
+    try {
+        return JSON.parse(s);
+    } catch {
+        try {
+            const fixed = s.replace(/,\s*([}\]])/g, '$1');
+            return JSON.parse(fixed);
+        } catch {
+            return null;
+        }
+    }
+}
+
+/**
+ * Normalize makesence for UI (green/red) and propositions. Supports yes/no in many forms.
+ * @param {unknown} ms
+ * @returns {boolean | null} true = yes, false = no, null = unclear / missing
+ */
+function interpretMakesence(ms) {
+    if (typeof ms === 'boolean') return ms;
+    if (typeof ms === 'number' && Number.isFinite(ms)) {
+        if (ms === 1) return true;
+        if (ms === 0) return false;
+    }
+    let s = String(ms ?? '').trim();
+    s = s.replace(/^["']+|["']+$/g, '').trim();
+    s = s.replace(/[.!?…。]+$/g, '').trim();
+    s = s.toLowerCase();
+    if (s === 'yes' || s === 'true' || s === 'y' || s === '1') return true;
+    if (s === 'no' || s === 'false' || s === 'n' || s === '0') return false;
+    return null;
+}
+
+/**
+ * When JSON.parse fails or makesence is missing, try to read makesence from raw text.
+ * @param {string} raw
+ * @returns {boolean | null}
+ */
+function inferMakesenceFromRaw(raw) {
+    const t = String(raw);
+    const quoted = /"(?:makesence|makesense|makeSence)"\s*:\s*"([^"]*)"/i;
+    const unquoted = /\bmakesence\s*:\s*"([^"]*)"/i;
+    const unquoted2 = /\bmakesense\s*:\s*"([^"]*)"/i;
+    for (const re of [quoted, unquoted, unquoted2]) {
+        const m = t.match(re);
+        if (m) {
+            const v = interpretMakesence(m[1]);
+            if (v !== null) return v;
+        }
+    }
+    let m = t.match(/"(?:makesence|makesense|makeSence)"\s*:\s*(true|false)\b/i);
+    if (m) return m[1].toLowerCase() === 'true';
+    m =
+        t.match(/\bmakesence\s*:\s*(true|false)\b/i) ||
+        t.match(/\bmakesense\s*:\s*(true|false)\b/i) ||
+        t.match(/\bmakeSence\s*:\s*(true|false)\b/i);
+    if (m) return m[1].toLowerCase() === 'true';
+    return null;
+}
+
+/** @param {string} raw */
+function inferExplanationFromRaw(raw) {
+    const t = String(raw);
+    const m =
+        t.match(/"enplaination"\s*:\s*"([^"]*)"/i) ||
+        t.match(/"explaination"\s*:\s*"([^"]*)"/i) ||
+        t.match(/"explanation"\s*:\s*"([^"]*)"/i) ||
+        t.match(/"exmplaination"\s*:\s*"([^"]*)"/i);
+    if (!m) return '';
+    return stripEmojiClusters(m[1].replace(/\\n/g, '\n'));
+}
+
+/**
+ * @param {Record<string, unknown>} obj
+ * @returns {boolean | null} true = yes, false = no, null = missing/invalid
+ */
+function parseMakesenceFromJson(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    const ms =
+        obj.makeSence ?? obj.makesence ?? obj.makesense ?? obj.make_sence ?? obj.makeSense;
+    return interpretMakesence(ms);
+}
+
+/** @param {Record<string, unknown>} obj */
+function explanationFromDiscoveryJson(obj) {
+    if (!obj || typeof obj !== 'object') return '';
+    const ex =
+        obj.explanation ?? obj.exmplaination ?? obj.enplaination ?? obj.explaination;
+    return stripEmojiClusters(String(ex ?? '').trim());
+}
+
+/**
+ * @param {Record<string, unknown>} obj
+ * @returns {string[]}
+ */
+function propositionsFromDiscoveryJson(obj) {
+    const ms =
+        obj.makeSence ?? obj.makesence ?? obj.makesense ?? obj.make_sence ?? obj.makeSense;
+    if (interpretMakesence(ms) === false) return [];
+    let props = obj.propositions;
+    if (!Array.isArray(props)) props = [];
+    const out = [];
+    const seen = new Set();
+    for (const p of props) {
+        const raw = stripEmojiClusters(String(p ?? '').trim());
+        const name = raw.split(/\s+/).filter(Boolean)[0] ?? '';
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(name);
+        if (out.length >= 6) break;
+    }
+    return out;
+}
+
+/**
+ * @param {string | undefined} content
+ * @returns {{ suggestions: string[], explanation: string, makesenceYes: boolean | null }}
+ */
+function parseAiDiscoveryReply(content) {
+    const raw = String(content || '').trim();
+    if (!raw) {
+        return { suggestions: [], explanation: '', makesenceYes: null };
+    }
+    const obj = extractJsonObjectFromAiReply(raw);
+    const suggestions = obj && typeof obj === 'object' ? propositionsFromDiscoveryJson(obj) : [];
+    let explanation = obj && typeof obj === 'object' ? explanationFromDiscoveryJson(obj) : '';
+    let makesenceYes = obj && typeof obj === 'object' ? parseMakesenceFromJson(obj) : null;
+    if (makesenceYes === null) {
+        const inferred = inferMakesenceFromRaw(raw);
+        if (inferred !== null) makesenceYes = inferred;
+    }
+    if (!String(explanation || '').trim()) {
+        const ex = inferExplanationFromRaw(raw);
+        if (ex) explanation = ex;
+    }
+    return { suggestions, explanation, makesenceYes };
+}
+
+function promptPartsFromItem(item) {
+    if (item && typeof item.emoji === 'string' && typeof item.name === 'string') {
+        return { icon: item.emoji, text: item.name };
+    }
+    return splitLabel(item && typeof item.name === 'string' ? item.name : '');
+}
+
+/** Tier from library for a canvas item or library row (canvas copies may omit tier). */
+function tierFromLibraryRef(item) {
+    if (!item || typeof item.id !== 'string') return 0;
+    const lib = state.library.find((e) => e.id === item.id);
+    return typeof lib?.tier === 'number' ? lib.tier : 0;
+}
+
+/** Tier the new discovery would get: 1 + max(parent tiers). */
+function tierForPendingDiscovery(itemA, itemB) {
+    return 1 + Math.max(tierFromLibraryRef(itemA), tierFromLibraryRef(itemB));
+}
+
+/**
+ * Builds the exact system + user messages sent to the model for discovery suggestions.
+ * @returns {{ userPrompt: string, systemContent: string, messages: { role: string, content: string }[] }}
+ */
+function composeAiDiscoveryRequest(itemA, itemB) {
+    const la = promptPartsFromItem(itemA);
+    const lb = promptPartsFromItem(itemB);
+    const itemName1 = la.text.trim() || 'Item A';
+    const itemName2 = lb.text.trim() || 'Item B';
+
+    const userPrompt =
+        `Give exactly six name ideas for an element-combining game like Little Alchemy\n\n` +
+        `Combine "${itemName1}" and "${itemName2}" with a coherent imaginative style.\n\n` +
+        `Each proposition must be exactly one word: no spaces, no phrases (use compounds or hyphens if needed, e.g. Sunstone or Red-hot).\n\n` +
+        `Reply in JSON only (no markdown fences, no text outside the object):\n` +
+        `{\n` +
+        `  "explanation": "Short optional note (e.g. theme of the names).",\n` +
+        `  "propositions": ["Mud", "Clay", "Brick", "Loam", "Silt", "Peat"]\n` +
+        `}\n\n` +
+        `propositions must be exactly six distinct, non-empty strings; each string is a single word only.`;
+
+    const systemContent =
+        'Reply with a single valid JSON object only. Keys: explanation (string), propositions (array of exactly six non-empty distinct single-word strings — one word each, no spaces). No verdict or boolean about validity.';
+
+    return {
+        userPrompt,
+        systemContent,
+        messages: [
+            { role: 'system', content: systemContent },
+            { role: 'user', content: userPrompt }
+        ]
+    };
+}
+
+/** Single block: system message then user message (what the API receives, in order). */
+function formatOutgoingAiPreview(req) {
+    return `${req.systemContent}\n\n${req.userPrompt}`;
+}
+
+async function fetchAiPropositions(itemA, itemB, precomposed) {
+    const { messages } = precomposed ?? composeAiDiscoveryRequest(itemA, itemB);
+
+    const data = await fetchChatCompletions({
+        model: 'gpt-4o-mini',
+        temperature: 0.75,
+        messages
+    });
+
+    const content = data.choices?.[0]?.message?.content;
+    return parseAiDiscoveryReply(content);
+}
+
+/** @param {Record<string, number>} deltas item id → amount to add */
+function addItemsToPlayerInventory(deltas) {
+    if (!deltas || typeof deltas !== 'object') return;
+    let any = false;
+    for (const [id, q] of Object.entries(deltas)) {
+        if (typeof id !== 'string' || !id.trim()) continue;
+        const n = Math.floor(Number(q));
+        if (!Number.isFinite(n) || n <= 0) continue;
+        state.playerInventory[id] = (state.playerInventory[id] || 0) + n;
+        any = true;
+    }
+    if (any) {
+        renderPlayerInventory();
+    }
+}
+
+const INVENTORY_GRID_SLOTS = 100;
+
+function renderPlayerInventory() {
+    const wrap = document.getElementById('player-inventory');
+    const metaEl = document.getElementById('inventory-meta');
+    const overflowEl = document.getElementById('player-inventory-overflow');
+    if (!wrap) return;
+    const entries = Object.entries(state.playerInventory).filter(([, c]) => (c | 0) > 0);
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+    const overflow = Math.max(0, entries.length - INVENTORY_GRID_SLOTS);
+
+    wrap.innerHTML = '';
+    wrap.className = 'inventory-grid-10 text-slate-300';
+
+    for (let i = 0; i < INVENTORY_GRID_SLOTS; i++) {
+        const cell = document.createElement('div');
+        cell.className = 'inv-slot inv-slot--empty';
+        cell.setAttribute('role', 'gridcell');
+        if (i < entries.length) {
+            const [id, count] = entries[i];
+            cell.classList.remove('inv-slot--empty');
+            cell.classList.add('inv-slot--filled');
+            const lib = state.library.find((e) => e.id === id);
+            const emoji = lib
+                ? typeof lib.emoji === 'string'
+                    ? lib.emoji
+                    : splitLabel(lib.name).icon
+                : '·';
+            const name = lib
+                ? typeof lib.name === 'string'
+                    ? splitLabel(lib.name).text
+                    : String(lib.name)
+                : id;
+            cell.title = `${name} ×${count | 0}`;
+            const iconSrc = lib ? iconSrcForItem(lib) : null;
+            if (iconSrc) {
+                const img = document.createElement('img');
+                img.className = 'inv-slot-icon-img select-none';
+                img.src = iconSrc;
+                img.alt = '';
+                img.decoding = 'async';
+                const cnt = document.createElement('span');
+                cnt.className = 'tabular-nums text-slate-400 leading-none mt-0.5';
+                cnt.textContent = `×${count | 0}`;
+                cell.appendChild(img);
+                cell.appendChild(cnt);
+            } else {
+                cell.innerHTML =
+                    `<span class="text-lg leading-none select-none" aria-hidden="true">${emoji}</span>` +
+                    `<span class="tabular-nums text-slate-400 leading-none mt-0.5">×${count | 0}</span>`;
+            }
+        }
+        wrap.appendChild(cell);
+    }
+
+    if (metaEl) {
+        const n = entries.length;
+        metaEl.textContent = n === 0 ? 'Empty' : `${n} type${n === 1 ? '' : 's'}`;
+    }
+    if (overflowEl) {
+        if (overflow > 0) {
+            overflowEl.textContent = `+${overflow} more (not shown in grid)`;
+            overflowEl.classList.remove('hidden');
+        } else {
+            overflowEl.textContent = '';
+            overflowEl.classList.add('hidden');
+        }
+    }
+}
+
+/** Split "🌍 Earth" → { icon: "🌍", text: "Earth" } (first space separates emoji from name) */
+function splitLabel(full) {
+    const s = typeof full === 'string' ? full.trim() : '';
+    const i = s.indexOf(' ');
+    if (i === -1) {
+        const icon = Array.from(s)[0] || '';
+        const text = s.slice(icon.length).trim() || icon;
+        return { icon, text };
+    }
+    return { icon: s.slice(0, i), text: s.slice(i + 1).trim() };
+}
+
+function slugFromLabel(full) {
+    const { text } = splitLabel(full);
+    return text.toLowerCase().replace(/\s/g, '-');
+}
+
+function slugFromNameText(nameText) {
+    const t = typeof nameText === 'string' ? nameText.trim() : '';
+    return t.toLowerCase().replace(/\s/g, '-');
+}
+
+/** Turn { resultId: { a, b, name } } into sorted combo keys for lookup */
+function buildRecipeIndex(recipesByResultId) {
+    const index = {};
+    for (const [resultId, def] of Object.entries(recipesByResultId)) {
+        const key = [def.a, def.b].sort().join('+');
+        index[key] = { id: resultId, emoji: def.emoji, name: def.name };
+    }
+    return index;
+}
+
+/**
+ * Minimal combination depth from base items: tier 0 = no recipe (starters).
+ * Crafted: 1 + max(tier(a), tier(b)). Cycles / missing ids break with tier 0 + console warning.
+ */
+function computeItemTiers(items) {
+    const memo = {};
+    const visiting = new Set();
+
+    function tierOf(id) {
+        if (Object.prototype.hasOwnProperty.call(memo, id)) {
+            return memo[id];
+        }
+        if (visiting.has(id)) {
+            console.warn('Tier: cycle involving', id);
+            return (memo[id] = 0);
+        }
+        const def = items[id];
+        if (!def || typeof def.name !== 'string' || typeof def.emoji !== 'string') {
+            console.warn('Tier: unknown item id', id);
+            return (memo[id] = 0);
+        }
+        if (typeof def.a !== 'string' || typeof def.b !== 'string') {
+            return (memo[id] = 0);
+        }
+        visiting.add(id);
+        const t = 1 + Math.max(tierOf(def.a), tierOf(def.b));
+        visiting.delete(id);
+        return (memo[id] = t);
+    }
+
+    for (const id of Object.keys(items)) {
+        tierOf(id);
+    }
+    return memo;
+}
+
+/** Merge base DB items with in-session recipe index (new combos before next full reload). */
+function mergedItemsForTiers(itemsMap, recipeIndex) {
+    const merged = { ...itemsMap };
+    for (const [key, val] of Object.entries(recipeIndex)) {
+        const parts = key.split('+');
+        const norm = normalizeRecipeResult(val);
+        if (parts.length !== 2 || !norm) continue;
+        merged[norm.id] = { a: parts[0], b: parts[1], emoji: norm.emoji, name: norm.name };
+    }
+    return merged;
+}
+
+function recomputeAllTiers() {
+    if (!cachedBaseItemsMap) return;
+    const merged = mergedItemsForTiers(cachedBaseItemsMap, state.recipes);
+    const tierMap = computeItemTiers(merged);
+    for (const item of state.library) {
+        item.tier = tierMap[item.id] ?? 0;
+    }
+}
+
+function itemsMapToState(items) {
+    const library = [];
+    const recipesRaw = {};
+    for (const [id, def] of Object.entries(items)) {
+        if (!def || typeof def.name !== 'string' || typeof def.emoji !== 'string') continue;
+        const row = /** @type {{ id: string, emoji: string, name: string, tier: number, iconPath?: string }} */ ({
+            id,
+            emoji: def.emoji,
+            name: def.name,
+            tier: 0
+        });
+        if (typeof def.iconPath === 'string' && def.iconPath.trim()) {
+            row.iconPath = def.iconPath.trim();
+        }
+        library.push(row);
+        if (typeof def.a === 'string' && typeof def.b === 'string') {
+            recipesRaw[id] = { a: def.a, b: def.b, emoji: def.emoji, name: def.name };
+        }
+    }
+    return { library, recipesRaw };
+}
+
+async function loadGameData() {
+    const res = await apiFetch('/api/items');
+    if (!res.ok) {
+        throw new Error('Failed to load game data');
+    }
+    const payload = await res.json();
+    const items = payload && typeof payload.items === 'object' && payload.items !== null ? payload.items : null;
+    if (!items) {
+        throw new Error('Invalid /api/items response');
+    }
+    cachedBaseItemsMap = items;
+    const { library, recipesRaw } = itemsMapToState(cachedBaseItemsMap);
+    state.library = library;
+    state.recipes = buildRecipeIndex(recipesRaw);
+}
+
+const libraryEl = document.getElementById('library');
+const workspaceEl = document.getElementById('workspace');
+const factoryWorkspaceEl = document.getElementById('factory-workspace');
+const factoryCanvasWrapEl = document.getElementById('factory-canvas-wrap');
+const factoryCanvasEl = /** @type {HTMLCanvasElement | null} */ (document.getElementById('factory-canvas'));
+const tabLabBtn = document.getElementById('tab-lab');
+const tabFactoryBtn = document.getElementById('tab-factory');
+const panelLabEl = document.getElementById('panel-lab');
+const panelFactoryEl = document.getElementById('panel-factory');
+const sidebarHintLab = document.getElementById('sidebar-hint-lab');
+const sidebarHintFactory = document.getElementById('sidebar-hint-factory');
+const factoryClearBuildingsBtn = document.getElementById('factory-clear-buildings');
+const factoryUpgradeSizeBtn = document.getElementById('factory-upgrade-size');
+const factoryUpgradeSpeedBtn = document.getElementById('factory-upgrade-speed');
+const factoryUpgradeSizeReadout = document.getElementById('factory-upgrade-size-readout');
+const factoryUpgradeSpeedReadout = document.getElementById('factory-upgrade-speed-readout');
+const authOverlayEl = document.getElementById('auth-overlay');
+const authUsernameInput = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-username'));
+const authPasswordInput = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-password'));
+const authStatusEl = document.getElementById('auth-status');
+const authLoginBtn = document.getElementById('auth-login-btn');
+const authRegisterBtn = document.getElementById('auth-register-btn');
+const authLogoutBtn = document.getElementById('auth-logout-btn');
+const authUserPillEl = document.getElementById('auth-user-pill');
+
+/** @type {null | ReturnType<typeof setInterval>} */
+let factoryLoopTimerId = null;
+
+function setAuthStatus(msg) {
+    if (authStatusEl) authStatusEl.textContent = String(msg || '');
+}
+
+function setAuthBusy(on) {
+    if (authLoginBtn) authLoginBtn.disabled = on;
+    if (authRegisterBtn) authRegisterBtn.disabled = on;
+}
+
+function setAuthVisible(visible) {
+    if (!authOverlayEl) return;
+    authOverlayEl.classList.toggle('hidden', !visible);
+}
+
+function storeSessionToken(token) {
+    try {
+        localStorage.setItem('alchemic-auth-token', token || '');
+    } catch {
+        /* ignore */
+    }
+}
+
+function readStoredSessionToken() {
+    try {
+        return String(localStorage.getItem('alchemic-auth-token') || '');
+    } catch {
+        return '';
+    }
+}
+
+function applyLoggedInUi() {
+    if (authLogoutBtn) authLogoutBtn.classList.toggle('hidden', !state.auth.token);
+    if (authUserPillEl) {
+        const has = !!state.auth.token;
+        authUserPillEl.classList.toggle('hidden', !has);
+        authUserPillEl.textContent = has ? `@${state.auth.username || 'player'}` : '';
+    }
+}
+
+function normalizeFactoryFromServer(factory) {
+    if (!factory || typeof factory !== 'object') return;
+    state.factory.placements = factory.placements && typeof factory.placements === 'object' ? factory.placements : {};
+    state.factory.cellResources =
+        factory.cellResources && typeof factory.cellResources === 'object' ? factory.cellResources : {};
+    state.factory.transporterDirs =
+        factory.transporterDirs && typeof factory.transporterDirs === 'object' ? factory.transporterDirs : {};
+    state.factory.combinerDirs =
+        factory.combinerDirs && typeof factory.combinerDirs === 'object' ? factory.combinerDirs : {};
+    state.factory.combinerDiscovery =
+        factory.combinerDiscovery && typeof factory.combinerDiscovery === 'object'
+            ? factory.combinerDiscovery
+            : {};
+    state.factory.cellItems = factory.cellItems && typeof factory.cellItems === 'object' ? factory.cellItems : {};
+    state.factory.itemSlides = {};
+    state.factory.cellRejectFlashUntil =
+        factory.cellRejectFlashUntil && typeof factory.cellRejectFlashUntil === 'object'
+            ? factory.cellRejectFlashUntil
+            : {};
+    state.factory.sizeUpgradeLevel = Math.max(0, Math.min(MAX_FACTORY_SIZE_LEVEL, Number(factory.sizeUpgradeLevel || 0) | 0));
+    state.factory.loopMs = Math.max(MIN_FACTORY_LOOP_MS, Math.round(Number(factory.loopMs || FACTORY_LOOP_MS_DEFAULT)));
+    state.factory.loopTick = Number(factory.loopTick || 0) | 0;
+    state.factory.cameraX = Number.isFinite(Number(factory.cameraX)) ? Number(factory.cameraX) : state.factory.cameraX;
+    state.factory.cameraY = Number.isFinite(Number(factory.cameraY)) ? Number(factory.cameraY) : state.factory.cameraY;
+    state.factory.cameraZoom = Number.isFinite(Number(factory.cameraZoom))
+        ? Number(factory.cameraZoom)
+        : state.factory.cameraZoom;
+}
+
+function buildFactoryPayload() {
+    return {
+        placements: state.factory.placements,
+        cellResources: state.factory.cellResources,
+        transporterDirs: state.factory.transporterDirs,
+        sizeUpgradeLevel: state.factory.sizeUpgradeLevel,
+        loopMs: state.factory.loopMs,
+        loopTick: state.factory.loopTick,
+        cellItems: state.factory.cellItems,
+        combinerDirs: state.factory.combinerDirs,
+        combinerDiscovery: state.factory.combinerDiscovery,
+        factoryDiscoveryCombinerKey: state.factory.factoryDiscoveryCombinerKey,
+        cellRejectFlashUntil: state.factory.cellRejectFlashUntil,
+        cameraX: state.factory.cameraX,
+        cameraY: state.factory.cameraY,
+        cameraZoom: state.factory.cameraZoom
+    };
+}
+
+async function pullFactoryStateFromServer() {
+    const r = await apiFetch('/api/factory/state');
+    if (!r.ok) throw new Error(await r.text());
+    const payload = await r.json();
+    normalizeFactoryFromServer(payload && payload.factory ? payload.factory : null);
+}
+
+async function pushFactoryStateToServer() {
+    if (!state.auth.token) return;
+    try {
+        await apiFetch('/api/factory/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ factory: buildFactoryPayload() })
+        });
+    } catch {
+        /* ignore transient network failures */
+    }
+}
+
+function startFactoryPushLoop() {
+    if (state.auth.factorySyncTimerId != null) return;
+    state.auth.factorySyncTimerId = setInterval(() => {
+        void pushFactoryStateToServer();
+    }, 3000);
+}
+
+function stopFactoryPushLoop() {
+    if (state.auth.factorySyncTimerId == null) return;
+    clearInterval(state.auth.factorySyncTimerId);
+    state.auth.factorySyncTimerId = null;
+}
+
+async function runAuthRequest(path) {
+    const username = authUsernameInput ? authUsernameInput.value.trim().toLowerCase() : '';
+    const password = authPasswordInput ? authPasswordInput.value : '';
+    if (!username || !password) {
+        setAuthStatus('Enter login and password.');
+        return false;
+    }
+    setAuthBusy(true);
+    setAuthStatus('Please wait...');
+    try {
+        const r = await fetch(`${apiOrigin()}${path}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        if (!r.ok) {
+            setAuthStatus((await r.text()) || 'Login failed.');
+            return false;
+        }
+        const payload = await r.json();
+        state.auth.token = String(payload.token || '');
+        state.auth.username = String(payload.username || username);
+        if (!state.auth.token) {
+            setAuthStatus('Invalid auth response.');
+            return false;
+        }
+        storeSessionToken(state.auth.token);
+        applyLoggedInUi();
+        setAuthVisible(false);
+        setAuthStatus('');
+        return true;
+    } catch (err) {
+        setAuthStatus(err && err.message ? err.message : 'Network error');
+        return false;
+    } finally {
+        setAuthBusy(false);
+    }
+}
+
+/** @param {number} col @param {number} row @param {number} dir 0–3 */
+function factoryNeighborColRow(col, row, dir) {
+    const d = ((dir | 0) + 4) % 4;
+    const deltas = [
+        [0, -1],
+        [1, 0],
+        [0, 1],
+        [-1, 0]
+    ];
+    const [dc, dr] = deltas[d];
+    return { col: col + dc, row: row + dr };
+}
+
+/** @param {number} col @param {number} row */
+function factoryInBounds(col, row) {
+    return Number.isFinite(col) && Number.isFinite(row);
+}
+
+/**
+ * Extractors → adjacent transporters; belts → storage, empty transporters, or combiners (intake/merge);
+ * combiners eject along output dir onto empty transporters.
+ */
+function factoryRunSimTick() {
+    const slideDur = factoryLoopIntervalMs();
+    const slideT = performance.now();
+    for (const k of Object.keys(state.factory.itemSlides)) {
+        if (!state.factory.cellItems[k]) delete state.factory.itemSlides[k];
+    }
+
+    /** @type {Record<string, string>} */
+    const work = {};
+    for (const [k, v] of Object.entries(state.factory.cellItems)) {
+        if (typeof v === 'string' && v.trim()) work[k] = v.trim();
+    }
+    for (const dk of Object.keys(state.factory.combinerDiscovery)) {
+        delete work[dk];
+    }
+
+    for (const [key, p] of Object.entries(state.factory.placements)) {
+        if (p !== 'extractor') continue;
+        const parts = key.split(',');
+        const c = Number(parts[0]);
+        const r = Number(parts[1]);
+        if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+        const resId = factoryCellResourceId(c, r);
+        if (!resId) continue;
+        for (let dir = 0; dir < 4; dir++) {
+            const nb = factoryNeighborColRow(c, r, dir);
+            if (!factoryInBounds(nb.col, nb.row)) continue;
+            const tk = factoryPlacementKey(nb.col, nb.row);
+            if (state.factory.placements[tk] !== 'transporter') continue;
+            if (work[tk]) continue;
+            work[tk] = resId;
+            factoryRecordItemSlide(tk, key, slideDur, slideT);
+        }
+    }
+
+    /** @type {{ from: string, id: string }[]} */
+    const deposits = [];
+    /** @type {{ from: string, to: string, id: string }[]} */
+    const movesTT = [];
+    /** @type {{ from: string, to: string, id: string }[]} */
+    const movesToEmptyCombiner = [];
+    /** @type {{ from: string, to: string, incoming: string }[]} */
+    const combinerFeeds = [];
+
+    for (const [key, p] of Object.entries(state.factory.placements)) {
+        if (p !== 'transporter') continue;
+        const parts = key.split(',');
+        const col = Number(parts[0]);
+        const row = Number(parts[1]);
+        if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
+        const itemId = work[key];
+        if (!itemId) continue;
+        const tdir = factoryTransporterDir(key);
+        const nb = factoryNeighborColRow(col, row, tdir);
+        if (!factoryInBounds(nb.col, nb.row)) continue;
+        const destKey = factoryPlacementKey(nb.col, nb.row);
+        const destPl = state.factory.placements[destKey];
+        if (destPl === 'storage') {
+            deposits.push({ from: key, id: itemId });
+        } else if (destPl === 'transporter' && !work[destKey]) {
+            movesTT.push({ from: key, to: destKey, id: itemId });
+        } else if (destPl === 'combiner') {
+            if (state.factory.combinerDiscovery[destKey]) continue;
+            if (!work[destKey]) {
+                movesToEmptyCombiner.push({ from: key, to: destKey, id: itemId });
+            } else if (work[destKey] !== itemId) {
+                combinerFeeds.push({ from: key, to: destKey, incoming: itemId });
+            }
+        }
+    }
+
+    /** @type {Record<string, number>} */
+    const invDelta = {};
+    for (const dep of deposits) {
+        if (!work[dep.from]) continue;
+        delete work[dep.from];
+        invDelta[dep.id] = (invDelta[dep.id] || 0) + 1;
+    }
+    addItemsToPlayerInventory(invDelta);
+
+    movesTT.sort((a, b) => a.from.localeCompare(b.from));
+    const destClaimed = new Set();
+    const fromClaimed = new Set();
+    for (const m of movesTT) {
+        if (destClaimed.has(m.to) || fromClaimed.has(m.from)) continue;
+        destClaimed.add(m.to);
+        fromClaimed.add(m.from);
+        delete work[m.from];
+        work[m.to] = m.id;
+        factoryRecordItemSlide(m.to, m.from, slideDur, slideT);
+    }
+
+    movesToEmptyCombiner.sort((a, b) => a.from.localeCompare(b.from));
+    for (const m of movesToEmptyCombiner) {
+        if (destClaimed.has(m.to) || fromClaimed.has(m.from)) continue;
+        if (work[m.to]) continue;
+        if (state.factory.combinerDiscovery[m.to]) continue;
+        destClaimed.add(m.to);
+        fromClaimed.add(m.from);
+        delete work[m.from];
+        work[m.to] = m.id;
+        factoryRecordItemSlide(m.to, m.from, slideDur, slideT);
+    }
+
+    combinerFeeds.sort((a, b) => a.from.localeCompare(b.from));
+    const combinerDestClaimed = new Set();
+    for (const f of combinerFeeds) {
+        if (!work[f.from] || work[f.from] !== f.incoming) continue;
+        if (combinerDestClaimed.has(f.to)) continue;
+        if (fromClaimed.has(f.from)) continue;
+        const existing = work[f.to];
+        if (!existing || existing === f.incoming) continue;
+        if (state.factory.combinerDiscovery[f.to]) continue;
+        combinerDestClaimed.add(f.to);
+        fromClaimed.add(f.from);
+        delete work[f.from];
+        const comboKey = [existing, f.incoming].sort().join('+');
+        const result = state.recipes[comboKey];
+        delete work[f.to];
+        delete state.factory.itemSlides[f.to];
+        delete state.factory.itemSlides[f.from];
+        if (result && typeof result.id === 'string') {
+            work[f.to] = result.id;
+            factoryRecordItemSlide(f.to, f.from, slideDur, slideT);
+        } else {
+            state.factory.combinerDiscovery[f.to] = {
+                a: existing,
+                b: f.incoming,
+                comboKey
+            };
+        }
+    }
+
+    /** @type {{ from: string, to: string, id: string }[]} */
+    const ejects = [];
+    for (const [key, p] of Object.entries(state.factory.placements)) {
+        if (p !== 'combiner') continue;
+        if (state.factory.combinerDiscovery[key]) continue;
+        const outId = work[key];
+        if (!outId) continue;
+        const parts = key.split(',');
+        const c = Number(parts[0]);
+        const r = Number(parts[1]);
+        if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+        const cdir = factoryCombinerDir(key);
+        const nb = factoryNeighborColRow(c, r, cdir);
+        if (!factoryInBounds(nb.col, nb.row)) continue;
+        const nk = factoryPlacementKey(nb.col, nb.row);
+        if (state.factory.placements[nk] !== 'transporter') continue;
+        if (work[nk]) continue;
+        ejects.push({ from: key, to: nk, id: outId });
+    }
+    ejects.sort((a, b) => a.from.localeCompare(b.from));
+    const ejDest = new Set();
+    const ejFrom = new Set();
+    for (const e of ejects) {
+        if (ejDest.has(e.to) || ejFrom.has(e.from)) continue;
+        if (work[e.to]) continue;
+        ejDest.add(e.to);
+        ejFrom.add(e.from);
+        delete work[e.from];
+        work[e.to] = e.id;
+        factoryRecordItemSlide(e.to, e.from, slideDur, slideT);
+    }
+
+    /** @type {typeof state.factory.cellItems} */
+    const next = {};
+    for (const [k, v] of Object.entries(work)) {
+        if (!v) continue;
+        if (state.factory.placements[k] === 'storage') continue;
+        next[k] = v;
+    }
+    state.factory.cellItems = next;
+}
+
+function stopFactoryLoop() {
+    if (factoryLoopTimerId != null) {
+        clearInterval(factoryLoopTimerId);
+        factoryLoopTimerId = null;
+    }
+}
+
+function onFactoryLoopTick() {
+    state.factory.loopTick = (state.factory.loopTick | 0) + 1;
+    factoryRunSimTick();
+    state.factory.loopPulseUntil = performance.now() + 120;
+}
+
+function startFactoryLoop() {
+    stopFactoryLoop();
+    if (state.activeWorkspace !== 'factory' || !factoryCanvasEl) return;
+    const ms = factoryLoopIntervalMs();
+    onFactoryLoopTick();
+    factoryLoopTimerId = setInterval(onFactoryLoopTick, ms);
+}
+
+function restartFactoryLoop() {
+    if (state.activeWorkspace === 'factory') startFactoryLoop();
+}
+
+function updateFactoryUpgradeBar() {
+    const cols = factoryGridCols();
+    const rows = factoryGridRows();
+    if (factoryUpgradeSizeReadout) {
+        factoryUpgradeSizeReadout.textContent = `${cols}×${rows}`;
+    }
+    if (factoryUpgradeSpeedReadout) {
+        factoryUpgradeSpeedReadout.textContent = `${factoryLoopIntervalMs()} ms`;
+    }
+    if (factoryUpgradeSizeBtn) {
+        const maxed = state.factory.sizeUpgradeLevel >= MAX_FACTORY_SIZE_LEVEL;
+        factoryUpgradeSizeBtn.disabled = maxed;
+    }
+    if (factoryUpgradeSpeedBtn) {
+        factoryUpgradeSpeedBtn.disabled = !factoryCanSpeedUpgrade();
+    }
+}
+const modal = document.getElementById('discovery-modal');
+const discoveryCheckModal = document.getElementById('discovery-check-modal');
+const clearBtn = document.getElementById('clear-btn');
+const discoveryTitleEl = document.getElementById('discovery-title');
+const discoverySelectedNameEl = document.getElementById('discovery-selected-name');
+const discoveryStepNameEl = document.getElementById('discovery-step-name');
+const discoveryStepImageEl = document.getElementById('discovery-step-image');
+const discoveryImageDoneBtn = document.getElementById('discovery-image-done');
+const modalPreview = document.getElementById('modal-preview');
+const aiWrap = document.getElementById('ai-suggestions-wrap');
+const aiStatus = document.getElementById('ai-status');
+const aiOutgoingWrap = document.getElementById('ai-outgoing-wrap');
+const aiOutgoingEl = document.getElementById('ai-outgoing');
+const aiReplyWrap = document.getElementById('ai-reply-wrap');
+const aiReplyFullEl = document.getElementById('ai-reply-full');
+const aiSuggestionsEl = document.getElementById('ai-suggestions');
+const discoveryAiImageBtn = document.getElementById('discovery-ai-image-btn');
+const discoveryTakeIconBtn = document.getElementById('discovery-take-icon');
+const discoveryIconUrlInput = document.getElementById('discovery-icon-url');
+const discoveryApplyIconUrlBtn = document.getElementById('discovery-apply-icon-url');
+const discoveryAiImageStatus = document.getElementById('discovery-ai-image-status');
+const discoveryAiImageImg = document.getElementById('discovery-ai-image-img');
+const discoveryAiImageGridEl = document.getElementById('discovery-ai-image-grid');
+const saveDiscoveryBtn = document.getElementById('save-discovery');
+
+/** How many icons the image API requests per “Generate icon” run. */
+const DISCOVERY_ICON_VARIANT_COUNT = 1;
+
+const AI_REPLY_BASE_CLASS =
+    'text-[11px] leading-snug whitespace-pre-wrap break-words max-h-64 overflow-y-auto rounded-lg border p-2.5';
+
+/**
+ * Green / red / neutral using inline styles so colors always show.
+ * @param {HTMLElement | null} el
+ * @param {boolean | null} makesenceYes
+ */
+function applyAiExplanationAppearance(el, makesenceYes) {
+    if (!el) return;
+    el.className = AI_REPLY_BASE_CLASS;
+    el.style.borderStyle = 'solid';
+    el.style.borderWidth = '1px';
+    if (makesenceYes === true) {
+        el.style.borderColor = 'rgba(16, 185, 129, 0.65)';
+        el.style.backgroundColor = 'rgba(6, 78, 59, 0.42)';
+        el.style.color = 'rgb(167, 243, 208)';
+    } else if (makesenceYes === false) {
+        el.style.borderColor = 'rgba(239, 68, 68, 0.75)';
+        el.style.backgroundColor = 'rgba(69, 10, 10, 0.5)';
+        el.style.color = 'rgb(254, 202, 202)';
+    } else {
+        el.style.borderColor = 'rgb(71, 85, 105)';
+        el.style.backgroundColor = 'rgba(15, 23, 42, 0.72)';
+        el.style.color = 'rgb(203, 213, 225)';
+    }
+}
+
+function clearAiFullReplyUi() {
+    if (aiReplyFullEl) {
+        aiReplyFullEl.textContent = '';
+        aiReplyFullEl.removeAttribute('style');
+        aiReplyFullEl.className = `${AI_REPLY_BASE_CLASS} border border-slate-600 bg-slate-900/70 text-slate-300`;
+    }
+    if (aiReplyWrap) aiReplyWrap.classList.add('hidden');
+}
+
+function showDiscoveryCheckModal() {
+    if (discoveryCheckModal) discoveryCheckModal.classList.remove('hidden');
+}
+
+function hideDiscoveryCheckModal() {
+    if (discoveryCheckModal) discoveryCheckModal.classList.add('hidden');
+}
+
+/**
+ * Apply parsed AI discovery reply to the discovery modal UI.
+ * @param {{ suggestions: string[], explanation: string, makesenceYes: boolean | null }} parsed
+ */
+function applyDiscoveryAiResult(parsed) {
+    state.aiSuggestions = parsed.suggestions;
+    state.discoverySelectedName = '';
+    if (aiStatus) aiStatus.textContent = '';
+    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+    syncDiscoverySelectedNameUi();
+    renderAiSuggestions();
+    updateDiscoverySaveButton();
+}
+
+function clearDiscoveryAiImageGrid() {
+    if (!discoveryAiImageGridEl) return;
+    discoveryAiImageGridEl.classList.add('hidden');
+    const choices = discoveryAiImageGridEl.querySelectorAll('.discovery-ai-image-choice');
+    choices.forEach((btn) => {
+        btn.classList.add('hidden');
+        const img = btn.querySelector('img');
+        if (img) img.removeAttribute('src');
+        btn.classList.remove('ring-2', 'ring-blue-400', 'border-blue-500');
+        btn.classList.add('border-slate-600');
+        btn.removeAttribute('aria-pressed');
+    });
+}
+
+/**
+ * @param {string} url
+ * @param {HTMLElement} selectedBtn
+ */
+function selectDiscoveryAiCandidate(url, selectedBtn) {
+    state.discoveryPreviewUrl = url;
+    if (!discoveryAiImageGridEl) return;
+    const choices = discoveryAiImageGridEl.querySelectorAll('.discovery-ai-image-choice');
+    choices.forEach((btn) => {
+        const on = btn === selectedBtn;
+        btn.classList.toggle('ring-2', on);
+        btn.classList.toggle('ring-blue-400', on);
+        btn.classList.toggle('border-blue-500', on);
+        btn.classList.toggle('border-slate-600', !on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = false;
+}
+
+/**
+ * @param {string[]} urls
+ */
+function renderDiscoveryAiCandidates(urls) {
+    clearDiscoveryAiImageGrid();
+    if (!discoveryAiImageGridEl) return;
+    const list = urls
+        .filter((u) => typeof u === 'string' && u.trim())
+        .slice(0, DISCOVERY_ICON_VARIANT_COUNT);
+    if (!list.length) return;
+    const choices = discoveryAiImageGridEl.querySelectorAll('.discovery-ai-image-choice');
+    discoveryAiImageGridEl.classList.remove('hidden');
+    list.forEach((u, i) => {
+        const btn = choices[i];
+        if (!btn) return;
+        const img = btn.querySelector('img');
+        if (img) img.src = u;
+        btn.classList.remove('hidden');
+    });
+    const first = choices[0];
+    if (first && list[0]) selectDiscoveryAiCandidate(list[0], first);
+}
+
+if (discoveryAiImageGridEl) {
+    discoveryAiImageGridEl.addEventListener('click', (ev) => {
+        const t = ev.target;
+        if (!t || !(t instanceof Element)) return;
+        const btn = t.closest('.discovery-ai-image-choice');
+        if (!btn || btn.classList.contains('hidden')) return;
+        const img = btn.querySelector('img');
+        const u = img && img.getAttribute('src');
+        if (u) selectDiscoveryAiCandidate(u, /** @type {HTMLElement} */ (btn));
+    });
+}
+
+function resetDiscoveryAiImagePreview() {
+    state.discoveryPreviewUrl = '';
+    state.discoveryIconItemId = '';
+    if (discoveryAiImageBtn) discoveryAiImageBtn.disabled = false;
+    if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
+    if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = false;
+    if (discoveryIconUrlInput) discoveryIconUrlInput.value = '';
+    if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = '';
+    clearDiscoveryAiImageGrid();
+    if (discoveryAiImageImg) {
+        discoveryAiImageImg.removeAttribute('src');
+        discoveryAiImageImg.classList.add('hidden');
+    }
+}
+
+/** @returns {string} */
+function buildDiscoveryImagePrompt() {
+    const itemName = (state.discoveryIconItemName || '').trim() || 'item';
+    return `Emoji-like image of the object: ${itemName}.`;
+}
+
+function setDiscoveryStep(step) {
+    const isName = step === 'name';
+    if (discoveryStepNameEl) discoveryStepNameEl.classList.toggle('hidden', !isName);
+    if (discoveryStepImageEl) discoveryStepImageEl.classList.toggle('hidden', isName);
+}
+
+async function generateDiscoveryIconPreview() {
+    if (!discoveryAiImageBtn) return;
+    discoveryAiImageBtn.disabled = true;
+    if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
+    if (discoveryAiImageStatus) {
+        discoveryAiImageStatus.textContent = 'Generating icon…';
+    }
+    if (discoveryAiImageImg) {
+        discoveryAiImageImg.classList.add('hidden');
+        discoveryAiImageImg.removeAttribute('src');
+    }
+    clearDiscoveryAiImageGrid();
+    try {
+        const prompt = buildDiscoveryImagePrompt();
+        const data = await fetchImageGenerations({
+            model: 'dall-e-2',
+            prompt,
+            n: DISCOVERY_ICON_VARIANT_COUNT,
+            size: '256x256',
+            response_format: 'url'
+        });
+        const rows = Array.isArray(data?.data) ? data.data : [];
+        const urls = rows.map((row) => row && typeof row.url === 'string' && row.url.trim()).filter(Boolean);
+        if (!urls.length) throw new Error('No image URLs in response');
+        renderDiscoveryAiCandidates(urls);
+        if (discoveryAiImageStatus) {
+            discoveryAiImageStatus.textContent =
+                'Tap Take icon to save — or Generate icon to try again.';
+        }
+    } catch (err) {
+        let msg = err && typeof err.message === 'string' ? err.message : String(err);
+        try {
+            const j = JSON.parse(msg);
+            if (j?.error?.message) msg = j.error.message;
+        } catch {
+            /* raw */
+        }
+        state.discoveryPreviewUrl = '';
+        clearDiscoveryAiImageGrid();
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = msg.slice(0, 280);
+    } finally {
+        discoveryAiImageBtn.disabled = false;
+        if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = !state.discoveryPreviewUrl;
+    }
+}
+
+async function saveDiscoveryAndStartIcon() {
+    const text = getDiscoveryChosenName();
+    if (!text || !isDiscoveryNameAllowed(text) || suggestionAlreadyInLibrary(text)) return;
+    const pending = state.pendingCombination;
+    if (!pending) return;
+
+    const icon = '✨';
+    const id = slugFromNameText(text);
+    const newElement = { id, emoji: icon, name: text };
+    const ingA = pending.a.id;
+    const ingB = pending.b.id;
+
+    state.recipes[pending.key] = { id, emoji: icon, name: text };
+
+    const li = state.library.findIndex((e) => e.id === id);
+    if (li === -1) state.library.push(newElement);
+    else state.library[li] = newElement;
+    recomputeAllTiers();
+
+    const factoryCombKey = state.factory.factoryDiscoveryCombinerKey;
+    if (!factoryCombKey) {
+        const midX = (pending.a.x + pending.b.x) / 2;
+        const midY = (pending.a.y + pending.b.y) / 2;
+        const placed = state.library.find((e) => e.id === id) || newElement;
+        createElementOnCanvas(placed, midX + 40, midY + 40);
+        showPulse(midX + 40, midY + 40, 'bg-yellow-400');
+    } else {
+        state.factory.factoryDiscoveryCombinerKey = null;
+        delete state.factory.combinerDiscovery[factoryCombKey];
+        state.factory.cellItems[factoryCombKey] = id;
+    }
+
+    state.discoveryIconItemName = text;
+
+    state.pendingCombination = null;
+    state.aiSuggestions = [];
+    state.discoverySelectedName = '';
+    if (aiWrap) aiWrap.classList.add('hidden');
+    clearAiFullReplyUi();
+    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+
+    renderLibrary();
+    modal.classList.add('hidden');
+
+    if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = true;
+    try {
+        await postItemUpsertRemote({
+            id,
+            emoji: icon,
+            name: text,
+            ingredient_a: ingA,
+            ingredient_b: ingB
+        });
+    } catch (err) {
+        console.warn(err);
+        if (discoveryAiImageStatus) {
+            discoveryAiImageStatus.textContent =
+                'Could not sync to catalog — try again. ' +
+                (err && typeof err.message === 'string' ? err.message.slice(0, 120) : '');
+        }
+    } finally {
+        if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = false;
+    }
+}
+
+async function applyDiscoveryIconFromUrl() {
+    const itemId = state.discoveryIconItemId;
+    const raw = discoveryIconUrlInput ? discoveryIconUrlInput.value.trim() : '';
+    if (!itemId || !raw) {
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Enter an image URL first.';
+        return;
+    }
+    let parsed;
+    try {
+        parsed = new URL(raw);
+    } catch {
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'That URL is not valid.';
+        return;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Use an http or https image URL.';
+        return;
+    }
+    if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = true;
+    if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Downloading…';
+    try {
+        const out = await postSaveItemIconRemote(itemId, raw, { strictUserUrl: true });
+        state.discoveryPreviewUrl = '';
+        clearDiscoveryAiImageGrid();
+        if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
+            persistIconPathForItem(itemId, out.iconPath.trim());
+        }
+        await reloadCatalogFromApi();
+        if (discoveryAiImageImg && out.iconPath) {
+            discoveryAiImageImg.src = `${apiOrigin()}/${String(out.iconPath).replace(/^\/+/, '')}?t=${Date.now()}`;
+            discoveryAiImageImg.classList.remove('hidden');
+        }
+        if (discoveryAiImageStatus) {
+            discoveryAiImageStatus.textContent = 'Icon saved from URL. Tap Done when finished.';
+        }
+        if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = msg.slice(0, 280);
+    } finally {
+        if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = false;
+    }
+}
+
+function suggestionAlreadyInLibrary(nameText) {
+    const id = slugFromNameText(nameText);
+    return state.library.some((e) => e.id === id || slugFromNameText(e.name) === id);
+}
+
+function getDiscoveryChosenName() {
+    return (state.discoverySelectedName || '').trim();
+}
+
+function syncDiscoverySelectedNameUi() {
+    if (discoverySelectedNameEl) {
+        const t = getDiscoveryChosenName();
+        discoverySelectedNameEl.textContent = t || '— Tap a suggestion —';
+    }
+}
+
+function isDiscoveryNameAllowed(name) {
+    const n = String(name || '').trim();
+    return n && state.aiSuggestions.some((s) => s === n);
+}
+
+function updateDiscoverySaveButton() {
+    const name = getDiscoveryChosenName();
+    const valid = isDiscoveryNameAllowed(name) && !suggestionAlreadyInLibrary(name);
+    if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = !valid;
+}
+
+function setDiscoverySelectedName(name) {
+    state.discoverySelectedName = String(name || '').trim();
+    syncDiscoverySelectedNameUi();
+    renderAiSuggestions();
+    updateDiscoverySaveButton();
+}
+
+function renderAiSuggestions() {
+    if (!aiSuggestionsEl) return;
+    aiSuggestionsEl.innerHTML = '';
+    const chosen = getDiscoveryChosenName();
+    state.aiSuggestions.forEach((prop) => {
+        const already = suggestionAlreadyInLibrary(prop);
+        const selected = chosen && prop === chosen;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.disabled = already;
+        btn.className =
+            'text-left py-2 px-3 rounded-lg border text-sm transition flex items-start gap-2 min-w-0 ' +
+            (already
+                ? 'opacity-40 cursor-not-allowed bg-slate-900/50 border-slate-700'
+                : selected
+                  ? 'bg-slate-800 border-blue-500 ring-1 ring-blue-400/50 hover:bg-slate-800'
+                  : 'bg-slate-900/80 border-slate-600 hover:border-blue-500 hover:bg-slate-800');
+        const nameSpan = document.createElement('span');
+        nameSpan.className =
+            'text-slate-200 flex-1 min-w-0 whitespace-normal break-words text-left leading-snug';
+        nameSpan.textContent = prop;
+        btn.appendChild(nameSpan);
+        btn.addEventListener('click', () => {
+            if (already) return;
+            setDiscoverySelectedName(prop);
+        });
+        aiSuggestionsEl.appendChild(btn);
+    });
+}
+
+function runDiscoveryAi(a, b) {
+    const req = composeAiDiscoveryRequest(a, b);
+    if (aiOutgoingEl && aiOutgoingWrap) {
+        aiOutgoingEl.textContent = formatOutgoingAiPreview(req);
+        aiOutgoingWrap.classList.remove('hidden');
+    }
+    clearAiFullReplyUi();
+    if (aiStatus) aiStatus.textContent = '';
+    if (aiSuggestionsEl) aiSuggestionsEl.innerHTML = '';
+    state.aiSuggestions = [];
+    state.discoverySelectedName = '';
+    syncDiscoverySelectedNameUi();
+    updateDiscoverySaveButton();
+    fetchAiPropositions(a, b, req)
+        .then((parsed) => {
+            applyDiscoveryAiResult(parsed);
+        })
+        .catch((err) => {
+            console.error(err);
+            clearAiFullReplyUi();
+            if (aiStatus) aiStatus.textContent = '';
+            state.aiSuggestions = [];
+            state.discoverySelectedName = '';
+            syncDiscoverySelectedNameUi();
+            updateDiscoverySaveButton();
+        });
+}
+
+function startAiForCombination(a, b) {
+    if (!aiSuggestionsEl) return;
+    runDiscoveryAi(a, b);
+}
+
+// Initialize Library
+function renderLibrary() {
+    libraryEl.innerHTML = '';
+    state.library.forEach((item) => {
+        const icon = typeof item.emoji === 'string' ? item.emoji : splitLabel(item.name).icon;
+        const text = typeof item.name === 'string' ? item.name : splitLabel(item.name).text;
+        const tier = typeof item.tier === 'number' ? item.tier : 0;
+        const card = document.createElement('div');
+        card.className =
+            'element-card bg-slate-800 p-3 rounded-xl border border-slate-700 flex flex-col items-center justify-center hover:border-blue-500 hover:bg-slate-700 transition shadow-lg';
+        card.draggable = true;
+
+        const iconWrap = document.createElement('div');
+        iconWrap.className = 'mb-1 flex items-center justify-center h-10 w-10 shrink-0';
+        const src = iconSrcForItem(item);
+        if (src) {
+            const img = document.createElement('img');
+            img.src = src;
+            img.alt = '';
+            img.className = 'library-item-icon-img';
+            img.decoding = 'async';
+            iconWrap.appendChild(img);
+        } else {
+            iconWrap.classList.add('text-3xl', 'leading-none');
+            iconWrap.textContent = icon;
+        }
+
+        const nameEl = document.createElement('span');
+        nameEl.className = 'text-xs font-medium text-slate-300 text-center';
+        nameEl.textContent = text;
+        const tierEl = document.createElement('span');
+        tierEl.className = 'text-[9px] text-slate-500 mt-1 tabular-nums';
+        tierEl.textContent = `T${tier}`;
+        card.appendChild(iconWrap);
+        card.appendChild(nameEl);
+        card.appendChild(tierEl);
+
+        card.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('elementId', item.id);
+        });
+        card.addEventListener(
+            'touchstart',
+            (e) => {
+                handleTouchStartFromLibrary(e, item);
+            },
+            { passive: false }
+        );
+
+        libraryEl.appendChild(card);
+    });
+    renderPlayerInventory();
+}
+
+function factoryPlacementKey(col, row) {
+    return `${col},${row}`;
+}
+
+/**
+ * After expanding the grid by a ring, move every keyed cell by (dc, dr).
+ * @param {number} dc
+ * @param {number} dr
+ */
+function factoryShiftKeyedMaps(dc, dr) {
+    if (dc === 0 && dr === 0) return;
+    /** @param {Record<string, unknown>} rec */
+    function shift(rec) {
+        const out = {};
+        for (const [k, v] of Object.entries(rec)) {
+            const parts = k.split(',');
+            const c = Number(parts[0]);
+            const r = Number(parts[1]);
+            if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+            out[`${c + dc},${r + dr}`] = v;
+        }
+        return out;
+    }
+    state.factory.placements = /** @type {typeof state.factory.placements} */ (shift(state.factory.placements));
+    state.factory.transporterDirs = /** @type {typeof state.factory.transporterDirs} */ (shift(state.factory.transporterDirs));
+    state.factory.combinerDirs = /** @type {typeof state.factory.combinerDirs} */ (shift(state.factory.combinerDirs));
+    state.factory.combinerDiscovery = /** @type {typeof state.factory.combinerDiscovery} */ (shift(state.factory.combinerDiscovery));
+    {
+        const slides = state.factory.itemSlides;
+        const out = /** @type {typeof state.factory.itemSlides} */ ({});
+        for (const [toKey, s] of Object.entries(slides)) {
+            if (!s || typeof s.fromKey !== 'string') continue;
+            const tp = toKey.split(',');
+            const tc = Number(tp[0]);
+            const tr = Number(tp[1]);
+            const fp = s.fromKey.split(',');
+            const fc = Number(fp[0]);
+            const fr = Number(fp[1]);
+            if (!Number.isFinite(tc) || !Number.isFinite(tr) || !Number.isFinite(fc) || !Number.isFinite(fr)) continue;
+            out[`${tc + dc},${tr + dr}`] = {
+                fromKey: `${fc + dc},${fr + dr}`,
+                startT: s.startT,
+                durMs: s.durMs
+            };
+        }
+        state.factory.itemSlides = out;
+    }
+    state.factory.cellResources = /** @type {typeof state.factory.cellResources} */ (shift(state.factory.cellResources));
+    state.factory.cellItems = /** @type {typeof state.factory.cellItems} */ (shift(state.factory.cellItems));
+    state.factory.cellRejectFlashUntil = /** @type {typeof state.factory.cellRejectFlashUntil} */ (
+        shift(state.factory.cellRejectFlashUntil)
+    );
+
+    const fk = state.factory.factoryDiscoveryCombinerKey;
+    if (fk) {
+        const p = fk.split(',');
+        const c = Number(p[0]);
+        const r = Number(p[1]);
+        if (Number.isFinite(c) && Number.isFinite(r)) {
+            state.factory.factoryDiscoveryCombinerKey = `${c + dc},${r + dr}`;
+        }
+    }
+}
+
+function factoryGridCols() {
+    const lv = Math.max(0, Math.min(MAX_FACTORY_SIZE_LEVEL, state.factory.sizeUpgradeLevel | 0));
+    return FACTORY_GRID_BASE + 2 * lv;
+}
+
+function factoryGridRows() {
+    return factoryGridCols();
+}
+
+function factoryLoopIntervalMs() {
+    const n = Number(state.factory.loopMs);
+    const ms = Number.isFinite(n) && n > 0 ? n : FACTORY_LOOP_MS_DEFAULT;
+    return Math.max(MIN_FACTORY_LOOP_MS, Math.round(ms));
+}
+
+/** @returns {boolean} */
+function factoryCanSpeedUpgrade() {
+    const cur = factoryLoopIntervalMs();
+    const next = Math.max(MIN_FACTORY_LOOP_MS, Math.round(cur * 0.9));
+    return next < cur;
+}
+
+/**
+ * Material on a cell from the four corner sources (NW wood, NE stone, SW water, SE dirt).
+ * A cell counts if it is that corner or one step away orthogonally (Manhattan distance 1); no diagonals-only tiles.
+ * If a cell is in range of two sources (small grids), pick wood, stone, water, dirt (fixed priority).
+ */
+function factoryMaterialFromCornerSources(col, row) {
+    const center2Col = factoryGridCols() - 1;
+    const center2Row = factoryGridRows() - 1;
+    const span2 = factoryGridCols() - 1;
+    const col2 = col * 2;
+    const row2 = row * 2;
+    const corners = [
+        [center2Col - span2, center2Row - span2, 'wood'],
+        [center2Col + span2, center2Row - span2, 'stone'],
+        [center2Col - span2, center2Row + span2, 'water'],
+        [center2Col + span2, center2Row + span2, 'dirt']
+    ];
+    const found = [];
+    for (const [cc2, cr2, id] of corners) {
+        const d2 = Math.abs(col2 - cc2) + Math.abs(row2 - cr2);
+        if (d2 === 0 || d2 === 2) found.push(id);
+    }
+    if (found.length === 0) return null;
+    const uniq = [...new Set(found)];
+    if (uniq.length === 1) return uniq[0];
+    const order = { wood: 0, stone: 1, water: 2, dirt: 3 };
+    return uniq.sort((a, b) => order[a] - order[b])[0];
+}
+
+function factoryCellResourceId(col, row) {
+    const key = factoryPlacementKey(col, row);
+    const stored = state.factory.cellResources[key];
+    if (stored && typeof stored === 'string' && stored.trim()) return stored.trim();
+    return factoryMaterialFromCornerSources(col, row);
+}
+
+function factoryTransporterDir(key) {
+    const d = state.factory.transporterDirs[key];
+    return typeof d === 'number' && d >= 0 && d <= 3 ? d : 0;
+}
+
+function factoryCombinerDir(key) {
+    const d = state.factory.combinerDirs[key];
+    return typeof d === 'number' && d >= 0 && d <= 3 ? d : 0;
+}
+
+/**
+ * @param {string} toKey
+ * @param {string} fromKey
+ * @param {number} durMs
+ * @param {number} startT performance.now()
+ */
+function factoryRecordItemSlide(toKey, fromKey, durMs, startT) {
+    state.factory.itemSlides[toKey] = { fromKey, startT, durMs };
+}
+
+/** @param {string} key */
+function factoryClearSlidesTouchingKey(key) {
+    delete state.factory.itemSlides[key];
+    for (const tk of Object.keys(state.factory.itemSlides)) {
+        if (state.factory.itemSlides[tk].fromKey === key) delete state.factory.itemSlides[tk];
+    }
+}
+
+/**
+ * @param {string} key
+ * @param {number} now
+ * @returns {number | null} 0..1 while sliding, null if no slide
+ */
+function factoryItemSlideProgress(key, now) {
+    const s = state.factory.itemSlides[key];
+    if (!s) return null;
+    return Math.min(1, Math.max(0, (now - s.startT) / s.durMs));
+}
+
+/** @param {string} key @param {{ col: number, row: number }} out */
+function factoryKeyToColRow(key, out) {
+    const p = key.split(',');
+    out.col = Number(p[0]);
+    out.row = Number(p[1]);
+}
+
+/**
+ * @param {number} col
+ * @param {number} row
+ * @param {{ cellPx: number, gap: number, originX: number, originY: number }} L
+ */
+function factoryCellCenterCss(col, row, L) {
+    const x0 = L.originX + col * (L.cellPx + L.gap);
+    const y0 = L.originY + row * (L.cellPx + L.gap);
+    return { x: x0 + L.cellPx / 2, y: y0 + L.cellPx / 2 };
+}
+
+function factoryEaseInOutQuad(t) {
+    return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+}
+
+/**
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {{ cellPx: number, gap: number, originX: number, originY: number }} L
+ * @param {number} sc
+ * @param {number} now
+ */
+function factoryDrawItemSlides(ctx, L, sc, now) {
+    const slides = state.factory.itemSlides;
+    const keys = Object.keys(slides);
+    if (keys.length === 0) return;
+
+    const cr = { col: 0, row: 0 };
+    const fr = { col: 0, row: 0 };
+
+    for (const toKey of keys) {
+        const s = slides[toKey];
+        if (!s) continue;
+        const itemId = state.factory.cellItems[toKey];
+        if (!itemId) {
+            delete slides[toKey];
+            continue;
+        }
+        const rawP = (now - s.startT) / s.durMs;
+        if (rawP >= 1) {
+            delete slides[toKey];
+            continue;
+        }
+        const p = factoryEaseInOutQuad(Math.min(1, Math.max(0, rawP)));
+        factoryKeyToColRow(toKey, cr);
+        factoryKeyToColRow(s.fromKey, fr);
+        if (!Number.isFinite(cr.col) || !Number.isFinite(fr.col)) {
+            delete slides[toKey];
+            continue;
+        }
+        const fromPt = factoryCellCenterCss(fr.col, fr.row, L);
+        const toPt = factoryCellCenterCss(cr.col, cr.row, L);
+        const x = fromPt.x + (toPt.x - fromPt.x) * p;
+        const y = fromPt.y + (toPt.y - fromPt.y) * p;
+        const icon = emojiForItemId(itemId);
+        if (!icon) continue;
+
+        ctx.save();
+        const fsz = Math.max(6, 20 * sc);
+        ctx.font = `${fsz}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.55)';
+        ctx.shadowBlur = 5 * sc;
+        ctx.shadowOffsetY = 1;
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(icon, x, y);
+        ctx.restore();
+    }
+}
+
+/** @returns {{ id: string, emoji: string, name: string }} */
+function factoryLibraryStubForId(id) {
+    const lib = state.library.find((e) => e.id === id);
+    if (lib) {
+        const emoji = typeof lib.emoji === 'string' ? lib.emoji : splitLabel(lib.name).icon;
+        const name = typeof lib.name === 'string' ? splitLabel(lib.name).text : String(lib.name);
+        return { id: lib.id, emoji, name };
+    }
+    return { id, emoji: '·', name: id };
+}
+
+function openFactoryCombinerDiscovery(combinerKey, aId, bId, comboKey) {
+    state.factory.factoryDiscoveryCombinerKey = combinerKey;
+    const a = factoryLibraryStubForId(aId);
+    const b = factoryLibraryStubForId(bId);
+    showDiscoveryCheckModal();
+    fetchAiPropositions(a, b)
+        .then((parsed) => {
+            hideDiscoveryCheckModal();
+            openDiscoveryModal(a, b, comboKey, parsed);
+        })
+        .catch((err) => {
+            console.error(err);
+            hideDiscoveryCheckModal();
+            openDiscoveryModal(a, b, comboKey);
+        });
+}
+
+/**
+ * Hit-test and draw layout in CSS pixels (relative to factory canvas).
+ * `originX/Y` is the world-space top-left anchor for cell [0,0] (can be far off-screen).
+ * @type {{
+ *   cellPx: number,
+ *   gap: number,
+ *   originX: number,
+ *   originY: number,
+ *   stride: number,
+ *   cssW: number,
+ *   cssH: number,
+ *   minCol: number,
+ *   maxCol: number,
+ *   minRow: number,
+ *   maxRow: number
+ * } | null}
+ */
+let factoryViewLayout = null;
+
+/** @type {number | null} */
+let factoryRenderRafId = null;
+
+function factoryComputeViewLayout(cssW, cssH) {
+    const gc = Math.max(2, factoryGridCols());
+    const gap = Math.max(0, Math.min(2, Math.round(cssW / 220)));
+    const pad = 8;
+    const availW = Math.max(40, cssW - 2 * pad);
+    const availH = Math.max(40, cssH - 2 * pad);
+    const legacyCellByW = (availW - (gc - 1) * gap) / gc;
+    const legacyCellByH = (availH - (gc - 1) * gap) / gc;
+    const baseCell = Math.max(16, Math.floor(Math.min(legacyCellByW, legacyCellByH)));
+    const zoom = Math.max(0.35, Math.min(3, Number(state.factory.cameraZoom) || 1));
+    const cellPx = Math.max(8, baseCell * zoom);
+    const stride = cellPx + gap;
+
+    const camX = Number(state.factory.cameraX);
+    const camY = Number(state.factory.cameraY);
+    const safeCamX = Number.isFinite(camX) ? camX : (factoryGridCols() - 1) / 2;
+    const safeCamY = Number.isFinite(camY) ? camY : (factoryGridRows() - 1) / 2;
+
+    const originX = cssW * 0.5 - safeCamX * stride - cellPx / 2;
+    const originY = cssH * 0.5 - safeCamY * stride - cellPx / 2;
+
+    const minCol = Math.floor((0 - originX) / stride) - 1;
+    const maxCol = Math.ceil((cssW - originX) / stride) + 1;
+    const minRow = Math.floor((0 - originY) / stride) - 1;
+    const maxRow = Math.ceil((cssH - originY) / stride) + 1;
+    return { cellPx, gap, originX, originY, stride, cssW, cssH, minCol, maxCol, minRow, maxRow };
+}
+
+function factoryResizeMainCanvas() {
+    if (!factoryCanvasEl || !factoryCanvasWrapEl) return;
+    const rect = factoryCanvasWrapEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = rect.width;
+    const cssH = rect.height;
+    if (cssW < 4 || cssH < 4) return;
+    const bw = Math.max(1, Math.round(cssW * dpr));
+    const bh = Math.max(1, Math.round(cssH * dpr));
+    if (factoryCanvasEl.width !== bw || factoryCanvasEl.height !== bh) {
+        factoryCanvasEl.width = bw;
+        factoryCanvasEl.height = bh;
+    }
+}
+
+/**
+ * @param {number} clientX
+ * @param {number} clientY
+ * @returns {{ col: number, row: number } | null}
+ */
+function factoryPixelToCell(clientX, clientY) {
+    const L = factoryViewLayout;
+    if (!factoryCanvasEl || !L) return null;
+    const rect = factoryCanvasEl.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const rx = x - L.originX;
+    const ry = y - L.originY;
+    const col = Math.floor(rx / L.stride);
+    const row = Math.floor(ry / L.stride);
+    if (!Number.isFinite(col) || !Number.isFinite(row)) return null;
+    const lx = rx - col * L.stride;
+    const ly = ry - row * L.stride;
+    if (lx > L.cellPx || ly > L.cellPx) return null;
+    return { col, row };
+}
+
+/** @param {{ col: number, row: number }} a @param {{ col: number, row: number }} b */
+function factoryCellsOrthogonallyAdjacent(a, b) {
+    const d = Math.abs(a.col - b.col) + Math.abs(a.row - b.row);
+    return d === 1;
+}
+
+/**
+ * Orthogonal-only path from start to end (L-shaped). Longer axis first for predictable bends.
+ * @returns {{ col: number, row: number }[]}
+ */
+function factoryManhattanPath(c0, r0, c1, r1) {
+    const path = [{ col: c0, row: r0 }];
+    let c = c0;
+    let r = r0;
+    const dx = c1 - c0;
+    const dy = r1 - r0;
+    const horizFirst = Math.abs(dx) >= Math.abs(dy);
+    if (horizFirst) {
+        while (c !== c1) {
+            c += dx > 0 ? 1 : dx < 0 ? -1 : 0;
+            path.push({ col: c, row: r });
+        }
+        while (r !== r1) {
+            r += dy > 0 ? 1 : dy < 0 ? -1 : 0;
+            path.push({ col: c, row: r });
+        }
+    } else {
+        while (r !== r1) {
+            r += dy > 0 ? 1 : dy < 0 ? -1 : 0;
+            path.push({ col: c, row: r });
+        }
+        while (c !== c1) {
+            c += dx > 0 ? 1 : dx < 0 ? -1 : 0;
+            path.push({ col: c, row: r });
+        }
+    }
+    return path;
+}
+
+/** Flow dir 0 up, 1 right, 2 down, 3 left — chevron / sim output. */
+function factoryTransporterDirFromTo(from, to) {
+    const dc = to.col - from.col;
+    const dr = to.row - from.row;
+    if (dc === 1 && dr === 0) return 1;
+    if (dc === -1 && dr === 0) return 3;
+    if (dc === 0 && dr === 1) return 2;
+    if (dc === 0 && dr === -1) return 0;
+    return 1;
+}
+
+/**
+ * Keep prefix of path while cells are empty or already transporters; stop before other buildings.
+ * @param {{ col: number, row: number }[]} rawPath
+ */
+function factoryFilterBeltPath(rawPath) {
+    const out = [];
+    for (const cell of rawPath) {
+        const k = factoryPlacementKey(cell.col, cell.row);
+        const p = state.factory.placements[k];
+        if (!p || p === 'transporter') out.push(cell);
+        else break;
+    }
+    return out;
+}
+
+/**
+ * @param {{ col: number, row: number }[]} filtered
+ * @param {{ col: number, row: number }[]} rawPath full manhattan path (same start)
+ */
+function factoryDirsAlongFilteredPath(filtered, rawPath) {
+    const n = filtered.length;
+    if (n === 0) return [];
+    if (n === 1) {
+        let idx = -1;
+        for (let i = 0; i < rawPath.length; i++) {
+            if (rawPath[i].col === filtered[0].col && rawPath[i].row === filtered[0].row) {
+                idx = i;
+                break;
+            }
+        }
+        const nxt = idx >= 0 && idx < rawPath.length - 1 ? rawPath[idx + 1] : null;
+        if (nxt && factoryCellsOrthogonallyAdjacent(filtered[0], nxt)) {
+            return [factoryTransporterDirFromTo(filtered[0], nxt)];
+        }
+        return [1];
+    }
+    const dirs = [];
+    for (let i = 0; i < n - 1; i++) {
+        dirs.push(factoryTransporterDirFromTo(filtered[i], filtered[i + 1]));
+    }
+    dirs.push(factoryTransporterDirFromTo(filtered[n - 2], filtered[n - 1]));
+    return dirs;
+}
+
+function factoryApplyBeltPath(filtered, dirs) {
+    for (let i = 0; i < filtered.length; i++) {
+        const { col, row } = filtered[i];
+        const key = factoryPlacementKey(col, row);
+        delete state.factory.combinerDiscovery[key];
+        factoryClearSlidesTouchingKey(key);
+        state.factory.placements[key] = 'transporter';
+        state.factory.transporterDirs[key] = dirs[i];
+        delete state.factory.combinerDirs[key];
+    }
+    renderFactoryGrid();
+}
+
+/**
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {{ cellPx: number, gap: number, originX: number, originY: number }} L
+ * @param {number} sc
+ */
+function factoryDrawBeltDragPreview(ctx, L, sc) {
+    const cells = state.factory.beltDragPreview;
+    if (!cells || cells.length === 0) return;
+    const stride = L.cellPx + L.gap;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(163, 230, 53, 0.75)';
+    ctx.fillStyle = 'rgba(74, 222, 128, 0.12)';
+    ctx.setLineDash([4 * sc, 3 * sc]);
+    ctx.lineWidth = Math.max(1, 1.5 * sc);
+    for (const { col, row } of cells) {
+        const x0 = L.originX + col * stride;
+        const y0 = L.originY + row * stride;
+        ctx.beginPath();
+        ctx.rect(x0 + 0.5, y0 + 0.5, L.cellPx - 1, L.cellPx - 1);
+        ctx.fill();
+        ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+}
+
+/** Transporter line: pointerdown = first cell, pointerup = last cell (same cell = normal click). */
+/** @type {number | null} */
+let factoryBeltAnchorPointerId = null;
+let factoryBeltAnchorCol = 0;
+let factoryBeltAnchorRow = 0;
+let factorySuppressNextFactoryCanvasClick = false;
+/** @type {null | { pointerId: number, startX: number, startY: number, startCamX: number, startCamY: number, moved: boolean }} */
+let factoryCameraPan = null;
+
+function factoryClampCameraZoom(z) {
+    return Math.max(0.35, Math.min(3, Number(z) || 1));
+}
+
+/**
+ * Keep pointed world position stable while zooming.
+ * @param {number} clientX
+ * @param {number} clientY
+ * @param {number} nextZoom
+ */
+function factoryZoomAtClientPoint(clientX, clientY, nextZoom) {
+    if (!factoryCanvasEl || !factoryViewLayout) return;
+    const rect = factoryCanvasEl.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const L = factoryViewLayout;
+    const halfCellInStride = L.cellPx / (2 * L.stride);
+    const worldX = ((x - L.originX) / L.stride) - halfCellInStride;
+    const worldY = ((y - L.originY) / L.stride) - halfCellInStride;
+    state.factory.cameraZoom = factoryClampCameraZoom(nextZoom);
+    const after = factoryComputeViewLayout(rect.width, rect.height);
+    state.factory.cameraX = worldX - ((x - rect.width * 0.5) / after.stride);
+    state.factory.cameraY = worldY - ((y - rect.height * 0.5) / after.stride);
+}
+
+function factoryClearBeltLineState() {
+    factoryBeltAnchorPointerId = null;
+    state.factory.beltDragPreview = null;
+}
+
+/**
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {number} col
+ * @param {number} row
+ * @param {number} w
+ * @param {number} h
+ * @param {number} sc scale from cell size
+ */
+function factoryDrawCellContent(ctx, col, row, w, h, sc) {
+    const key = factoryPlacementKey(col, row);
+    const placement = state.factory.placements[key];
+    const resId = factoryCellResourceId(col, row);
+    const resIcon = resId ? emojiForItemId(resId) : '';
+    const hasRes = Boolean(resId);
+    const carryId = state.factory.cellItems[key];
+    const carryIcon = carryId ? emojiForItemId(carryId) : '';
+    const slideP = factoryItemSlideProgress(key, performance.now());
+    const hideCarryForSlide = slideP !== null && slideP < 1;
+
+    const midX = w / 2;
+    const midY = h / 2;
+    const fs = (n) => `${Math.max(6, n * sc)}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+
+    ctx.save();
+
+    const light = (col + row) % 2 === 0;
+    ctx.fillStyle = light ? '#e6e2d6' : '#d9d4c6';
+    ctx.fillRect(0, 0, w, h);
+    if (hasRes) {
+        ctx.fillStyle = 'rgba(52, 140, 72, 0.16)';
+        ctx.fillRect(0, 0, w, h);
+    }
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.06)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+
+    if (!placement && hasRes && resIcon) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = fs(22);
+        ctx.shadowColor = 'rgba(0,0,0,0.2)';
+        ctx.shadowBlur = 3 * sc;
+        ctx.shadowOffsetY = 1;
+        ctx.fillStyle = '#1c1917';
+        ctx.fillText(resIcon, midX, midY);
+        ctx.shadowBlur = 0;
+    }
+
+    if (placement === 'transporter') {
+        const tDir = factoryTransporterDir(key);
+        const angle = (tDir * Math.PI) / 2;
+        ctx.save();
+        ctx.translate(midX, midY);
+        ctx.rotate(angle);
+        const rw = w * 0.42;
+        const rh = h * 0.38;
+        ctx.fillStyle = '#1c1917';
+        ctx.fillRect(-rw, -rh, rw * 2, rh * 2);
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = Math.max(1, sc);
+        ctx.strokeRect(-rw, -rh, rw * 2, rh * 2);
+        ctx.fillStyle = '#ca8a04';
+        ctx.fillRect(-rw + 2 * sc, -rh * 0.22, rw * 2 - 4 * sc, rh * 0.44);
+        const rollerY = [-rh * 0.55, 0, rh * 0.55];
+        for (const ry of rollerY) {
+            ctx.beginPath();
+            ctx.arc(0, ry, 2.2 * sc, 0, Math.PI * 2);
+            ctx.fillStyle = '#44403c';
+            ctx.fill();
+            ctx.strokeStyle = '#57534e';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+        ctx.fillStyle = '#fde047';
+        ctx.beginPath();
+        ctx.moveTo(0, -rh * 0.85);
+        ctx.lineTo(3.5 * sc, -rh * 0.35);
+        ctx.lineTo(-3.5 * sc, -rh * 0.35);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+    } else if (placement === 'extractor') {
+        const bx = w * 0.12;
+        const bw = w * 0.76;
+        const bh = h * 0.28;
+        const by = h * 0.52;
+        ctx.fillStyle = '#b45309';
+        ctx.strokeStyle = '#78350f';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.rect(bx, by, bw, bh);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#44403c';
+        ctx.fillRect(bx + bw * 0.08, by - h * 0.22, bw * 0.84, h * 0.2);
+        ctx.strokeStyle = '#292524';
+        ctx.strokeRect(bx + bw * 0.08, by - h * 0.22, bw * 0.84, h * 0.2);
+        ctx.fillStyle = '#1c1917';
+        ctx.beginPath();
+        ctx.moveTo(midX, by - h * 0.38);
+        ctx.lineTo(midX + 5 * sc, by - h * 0.08);
+        ctx.lineTo(midX - 5 * sc, by - h * 0.08);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#57534e';
+        ctx.stroke();
+        ctx.fillStyle = '#78716c';
+        ctx.fillRect(midX - 2 * sc, by - h * 0.42, 4 * sc, h * 0.12);
+    } else if (placement === 'combiner') {
+        const cDir = factoryCombinerDir(key);
+        const angle = (cDir * Math.PI) / 2;
+        const bodyW = w * 0.72;
+        const bodyH = h * 0.5;
+        ctx.save();
+        ctx.translate(midX, midY);
+        ctx.rotate(angle);
+        ctx.fillStyle = '#5b21b6';
+        ctx.strokeStyle = '#4c1d95';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, -bodyH * 0.55);
+        ctx.lineTo(bodyW * 0.42, bodyH * 0.15);
+        ctx.lineTo(bodyW * 0.22, bodyH * 0.48);
+        ctx.lineTo(-bodyW * 0.22, bodyH * 0.48);
+        ctx.lineTo(-bodyW * 0.42, bodyH * 0.15);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#7c3aed';
+        ctx.beginPath();
+        ctx.arc(0, -bodyH * 0.08, bodyW * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#c4b5fd';
+        ctx.beginPath();
+        ctx.moveTo(0, -bodyH * 0.75);
+        ctx.lineTo(4 * sc, -bodyH * 0.38);
+        ctx.lineTo(-4 * sc, -bodyH * 0.38);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+    } else if (placement === 'storage') {
+        const cx = midX;
+        const chestW = w * 0.62;
+        const chestH = h * 0.42;
+        const top = h * 0.22;
+        ctx.fillStyle = '#78350f';
+        ctx.strokeStyle = '#451a03';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(cx - chestW / 2, top + chestH * 0.18, chestW, chestH * 0.78, 3 * sc);
+        } else {
+            ctx.rect(cx - chestW / 2, top + chestH * 0.18, chestW, chestH * 0.78);
+        }
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#92400e';
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(cx - chestW / 2 * 0.92, top, chestW * 0.92, chestH * 0.35, 2 * sc);
+        } else {
+            ctx.rect(cx - chestW / 2 * 0.92, top, chestW * 0.92, chestH * 0.35);
+        }
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.arc(cx, top + chestH * 0.52, 3 * sc, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#b45309';
+        ctx.lineWidth = 0.75;
+        ctx.stroke();
+    }
+
+    if (placement && hasRes && resIcon) {
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.font = fs(11);
+        ctx.shadowColor = 'rgba(0,0,0,0.25)';
+        ctx.shadowBlur = 2 * sc;
+        ctx.fillStyle = '#292524';
+        ctx.fillText(resIcon, w - 2, h - 1);
+        ctx.shadowBlur = 0;
+    }
+
+    if (state.factory.combinerDiscovery[key]) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const pulse = 0.82 + 0.18 * Math.sin(performance.now() * 0.007);
+        ctx.font = fs(26);
+        ctx.fillStyle = `rgba(251, 146, 60, ${pulse})`;
+        ctx.shadowColor = 'rgba(251, 146, 60, 0.45)';
+        ctx.shadowBlur = 10 * sc;
+        ctx.fillText('!', midX, midY);
+        ctx.shadowBlur = 0;
+    } else if (carryIcon && placement !== 'storage' && !hideCarryForSlide) {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.45)';
+        ctx.shadowBlur = 4 * sc;
+        ctx.shadowOffsetY = 1;
+        ctx.font = fs(20);
+        ctx.fillStyle = '#fafaf9';
+        ctx.fillText(carryIcon, midX, midY);
+        ctx.shadowBlur = 0;
+    }
+
+    const rejUntil = state.factory.cellRejectFlashUntil[key];
+    if (rejUntil && performance.now() < rejUntil) {
+        const pulse = 0.45 + 0.35 * Math.sin(performance.now() * 0.022);
+        ctx.save();
+        ctx.fillStyle = `rgba(239, 68, 68, ${0.1 + 0.12 * pulse})`;
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = `rgba(220, 38, 38, ${0.55 + 0.35 * pulse})`;
+        ctx.lineWidth = Math.max(2, 3.2 * sc);
+        ctx.strokeRect(1.5 * sc, 1.5 * sc, w - 3 * sc, h - 3 * sc);
+        ctx.strokeStyle = `rgba(254, 202, 202, ${0.35 * pulse})`;
+        ctx.lineWidth = Math.max(1, 1.5 * sc);
+        ctx.strokeRect(3 * sc, 3 * sc, w - 6 * sc, h - 6 * sc);
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+function factoryDrawFullCanvas() {
+    if (!factoryCanvasEl || !factoryCanvasWrapEl) return;
+    if (state.activeWorkspace !== 'factory') return;
+
+    factoryResizeMainCanvas();
+    const ctx = factoryCanvasEl.getContext('2d');
+    if (!ctx) return;
+
+    const rect = factoryCanvasWrapEl.getBoundingClientRect();
+    const cssW = rect.width;
+    const cssH = rect.height;
+    if (cssW < 8 || cssH < 8) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    ctx.fillStyle = '#3a362e';
+    ctx.fillRect(0, 0, cssW, cssH);
+    const cx = cssW * 0.5;
+    const cy = cssH * 0.48;
+    const vr = Math.max(cssW, cssH) * 0.95;
+    const vg = ctx.createRadialGradient(cx, cy, vr * 0.05, cx, cy, vr * 0.55);
+    vg.addColorStop(0, 'rgba(90, 85, 72, 0.35)');
+    vg.addColorStop(0.55, 'rgba(45, 42, 36, 0)');
+    vg.addColorStop(1, 'rgba(12, 10, 8, 0.5)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    const L = factoryComputeViewLayout(cssW, cssH);
+    factoryViewLayout = L;
+    const sc = Math.max(0.5, Math.min(1.45, L.cellPx / 52));
+    const centerCol = (factoryGridCols() - 1) / 2;
+    const centerRow = (factoryGridRows() - 1) / 2;
+    const span = (factoryGridCols() - 1) / 2;
+    const legacyMinCol = Math.round(centerCol - span);
+    const legacyMaxCol = Math.round(centerCol + span);
+    const legacyMinRow = Math.round(centerRow - span);
+    const legacyMaxRow = Math.round(centerRow + span);
+    const legacyGridW = (legacyMaxCol - legacyMinCol + 1) * L.stride - L.gap;
+    const legacyGridH = (legacyMaxRow - legacyMinRow + 1) * L.stride - L.gap;
+    const legacyX = L.originX + legacyMinCol * L.stride;
+    const legacyY = L.originY + legacyMinRow * L.stride;
+
+    const pulseLeft = state.factory.loopPulseUntil - performance.now();
+    if (pulseLeft > 0) {
+        const a = Math.min(1, pulseLeft / 130) * 0.22;
+        ctx.save();
+        ctx.shadowColor = `rgba(234, 179, 8, ${a * 0.9})`;
+        ctx.shadowBlur = 18;
+        ctx.strokeStyle = 'rgba(202, 138, 4, 0.4)';
+        ctx.lineWidth = 1.25;
+        ctx.strokeRect(legacyX - 1, legacyY - 1, legacyGridW + 2, legacyGridH + 2);
+        ctx.restore();
+    }
+
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(legacyX - 0.5, legacyY - 0.5, legacyGridW + 1, legacyGridH + 1);
+
+    for (let row = L.minRow; row <= L.maxRow; row++) {
+        for (let col = L.minCol; col <= L.maxCol; col++) {
+            const x0 = L.originX + col * L.stride;
+            const y0 = L.originY + row * L.stride;
+            ctx.save();
+            ctx.translate(x0, y0);
+            factoryDrawCellContent(ctx, col, row, L.cellPx, L.cellPx, sc);
+            ctx.restore();
+        }
+    }
+
+    factoryDrawBeltDragPreview(ctx, L, sc);
+
+    const now = performance.now();
+    factoryDrawItemSlides(ctx, L, sc, now);
+
+    for (const k of Object.keys(state.factory.cellRejectFlashUntil)) {
+        if (state.factory.cellRejectFlashUntil[k] <= now) delete state.factory.cellRejectFlashUntil[k];
+    }
+}
+
+function factoryRenderLoop() {
+    if (state.activeWorkspace !== 'factory') {
+        factoryRenderRafId = null;
+        return;
+    }
+    try {
+        factoryDrawFullCanvas();
+    } catch (err) {
+        console.error('Factory canvas draw error', err);
+    }
+    factoryRenderRafId = requestAnimationFrame(factoryRenderLoop);
+}
+
+function factoryStartRenderLoop() {
+    if (!factoryCanvasEl) return;
+    if (factoryRenderRafId != null) return;
+    factoryRenderRafId = requestAnimationFrame(factoryRenderLoop);
+}
+
+function factoryStopRenderLoop() {
+    if (factoryRenderRafId != null) {
+        cancelAnimationFrame(factoryRenderRafId);
+        factoryRenderRafId = null;
+    }
+    factoryViewLayout = null;
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && state.activeWorkspace === 'factory') {
+            factoryStartRenderLoop();
+        } else if (document.hidden) {
+            factoryStopRenderLoop();
+        }
+    });
+}
+
+/**
+ * @param {number} col
+ * @param {number} row
+ * @param {boolean} shiftKey
+ */
+function factoryHandleCellAction(col, row, shiftKey) {
+    const key = factoryPlacementKey(col, row);
+    if (shiftKey) {
+        delete state.factory.placements[key];
+        delete state.factory.transporterDirs[key];
+        delete state.factory.combinerDirs[key];
+        delete state.factory.combinerDiscovery[key];
+        delete state.factory.cellItems[key];
+        factoryClearSlidesTouchingKey(key);
+        return;
+    }
+    const placement = state.factory.placements[key];
+    const sel = state.factory.selectedBuilding;
+
+    if (state.factory.combinerDiscovery[key]) {
+        const d = state.factory.combinerDiscovery[key];
+        openFactoryCombinerDiscovery(key, d.a, d.b, d.comboKey);
+        return;
+    }
+
+    if (placement === 'transporter' && (!sel || sel === 'transporter')) {
+        state.factory.transporterDirs[key] = (factoryTransporterDir(key) + 1) % 4;
+        return;
+    }
+
+    if (placement === 'combiner' && (!sel || sel === 'combiner')) {
+        state.factory.combinerDirs[key] = (factoryCombinerDir(key) + 1) % 4;
+        return;
+    }
+
+    if (!sel) return;
+    if (sel === 'extractor' && !factoryCellResourceId(col, row)) {
+        return;
+    }
+    delete state.factory.combinerDiscovery[key];
+    factoryClearSlidesTouchingKey(key);
+    state.factory.placements[key] = sel;
+    if (sel === 'extractor') {
+        delete state.factory.transporterDirs[key];
+        delete state.factory.combinerDirs[key];
+    } else if (sel === 'transporter') {
+        if (state.factory.transporterDirs[key] === undefined) {
+            state.factory.transporterDirs[key] = 0;
+        }
+        delete state.factory.combinerDirs[key];
+    } else if (sel === 'combiner') {
+        delete state.factory.transporterDirs[key];
+        if (state.factory.combinerDirs[key] === undefined) {
+            state.factory.combinerDirs[key] = 0;
+        }
+    } else {
+        delete state.factory.transporterDirs[key];
+        delete state.factory.combinerDirs[key];
+    }
+}
+
+function updateFactoryBuildButtons() {
+    const layout =
+        'factory-build-btn w-full flex items-center gap-3 py-3 px-3 rounded-xl border text-left text-sm transition min-h-[3.25rem] ';
+    document.querySelectorAll('.factory-build-btn').forEach((btn) => {
+        const type = btn.getAttribute('data-factory-building');
+        const sel = state.factory.selectedBuilding;
+        const on = type === sel;
+        btn.className =
+            layout +
+            (on
+                ? 'border-amber-500 bg-amber-900/30 text-amber-100 ring-1 ring-amber-500/50'
+                : 'border-slate-600 bg-slate-800 hover:border-amber-500/60 text-slate-200');
+    });
+}
+
+function renderFactoryGrid() {
+    updateFactoryUpgradeBar();
+    factoryStartRenderLoop();
+}
+
+function setWorkspace(which) {
+    if (which === 'factory' && !state.auth.token) {
+        setAuthVisible(true);
+        setAuthStatus('Login required for multiplayer factory.');
+        return;
+    }
+    state.activeWorkspace = which;
+    const isLab = which === 'lab';
+    const floatingUpgrades = document.getElementById('floating-factory-upgrades');
+    if (floatingUpgrades) {
+        floatingUpgrades.classList.toggle('hidden', isLab);
+    }
+    if (tabLabBtn && tabFactoryBtn) {
+        tabLabBtn.className =
+            'flex-1 py-2 px-3 rounded-lg text-sm font-semibold transition ' +
+            (isLab ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600');
+        tabFactoryBtn.className =
+            'flex-1 py-2 px-3 rounded-lg text-sm font-semibold transition ' +
+            (!isLab ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600');
+    }
+    if (panelLabEl && panelFactoryEl) {
+        panelLabEl.classList.toggle('hidden', !isLab);
+        panelFactoryEl.classList.toggle('hidden', isLab);
+    }
+    if (sidebarHintLab && sidebarHintFactory) {
+        sidebarHintLab.classList.toggle('hidden', !isLab);
+        sidebarHintFactory.classList.toggle('hidden', isLab);
+    }
+    if (workspaceEl && factoryWorkspaceEl) {
+        workspaceEl.classList.toggle('hidden', !isLab);
+        factoryWorkspaceEl.classList.toggle('hidden', isLab);
+    }
+    if (!isLab) {
+        if (!state.auth.enteringFactory) {
+            state.auth.enteringFactory = true;
+            pullFactoryStateFromServer()
+                .catch((err) => {
+                    console.warn('pullFactoryStateFromServer', err);
+                })
+                .finally(() => {
+                    state.auth.enteringFactory = false;
+                    renderFactoryGrid();
+                    startFactoryLoop();
+                    startFactoryPushLoop();
+                });
+        } else {
+            renderFactoryGrid();
+            startFactoryLoop();
+            startFactoryPushLoop();
+        }
+    } else {
+        void pushFactoryStateToServer();
+        stopFactoryPushLoop();
+        stopFactoryLoop();
+        factoryStopRenderLoop();
+        factoryClearBeltLineState();
+        setUpgradesModalOpen(false);
+    }
+}
+
+// Workspace Logic
+workspaceEl.addEventListener('dragover', (e) => e.preventDefault());
+
+workspaceEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('elementId');
+    const elementData = state.library.find(el => el.id === id);
+    if (elementData) {
+        createElementOnCanvas(elementData, e.clientX, e.clientY);
+    }
+});
+
+function createElementOnCanvas(data, x, y) {
+    const rect = workspaceEl.getBoundingClientRect();
+    const canvasX = x - rect.left - 40;
+    const canvasY = y - rect.top - 40;
+
+    const emoji = typeof data.emoji === 'string' ? data.emoji : splitLabel(data.name).icon;
+    const nameText = typeof data.name === 'string' ? data.name : splitLabel(data.name).text;
+
+    const instance = {
+        uid: Math.random().toString(36).substr(2, 9),
+        id: data.id,
+        emoji,
+        name: nameText,
+        x: canvasX,
+        y: canvasY
+    };
+
+    state.activeElements.push(instance);
+    renderCanvas();
+    checkCollisions(instance);
+}
+
+function renderCanvas() {
+    const instruction = document.getElementById('instruction');
+    instruction.style.display = state.activeElements.length > 0 ? 'none' : 'flex';
+
+    const existingUids = new Set(state.activeElements.map(e => e.uid));
+
+    Array.from(workspaceEl.querySelectorAll('.canvas-element')).forEach(el => {
+        if (!existingUids.has(el.dataset.uid)) el.remove();
+    });
+
+    state.activeElements.forEach(item => {
+        let el = workspaceEl.querySelector(`[data-uid="${item.uid}"]`);
+        if (!el) {
+            const icon = typeof item.emoji === 'string' ? item.emoji : splitLabel(item.name).icon;
+            const text = typeof item.name === 'string' ? item.name : splitLabel(item.name).text;
+            el = document.createElement('div');
+            el.className = 'canvas-element w-20 h-24 bg-slate-800/80 backdrop-blur-md border border-slate-600 rounded-xl shadow-2xl flex flex-col items-center justify-center cursor-move z-20';
+            el.dataset.uid = item.uid;
+            el.innerHTML = `
+                <span class="text-4xl pointer-events-none">${icon}</span>
+                <span class="text-[10px] uppercase font-bold text-slate-400 mt-2 pointer-events-none text-center px-1 leading-tight">${text}</span>
+            `;
+
+            el.addEventListener('mousedown', (e) => startDragging(e, item, el));
+            el.addEventListener('touchstart', (e) => startDragging(e, item, el), { passive: false });
+
+            workspaceEl.appendChild(el);
+        }
+        el.style.transform = `translate(${item.x}px, ${item.y}px)`;
+    });
+}
+
+function startDragging(e, item, el) {
+    e.preventDefault();
+    const startX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+    const startY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
+
+    const initialX = item.x;
+    const initialY = item.y;
+
+    el.style.zIndex = 100;
+
+    const move = (moveEvent) => {
+        const currentX = moveEvent.type.includes('touch') ? moveEvent.touches[0].clientX : moveEvent.clientX;
+        const currentY = moveEvent.type.includes('touch') ? moveEvent.touches[0].clientY : moveEvent.clientY;
+
+        item.x = initialX + (currentX - startX);
+        item.y = initialY + (currentY - startY);
+        el.style.transform = `translate(${item.x}px, ${item.y}px)`;
+    };
+
+    const stop = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', stop);
+        window.removeEventListener('touchmove', move);
+        window.removeEventListener('touchend', stop);
+        el.style.zIndex = 20;
+        checkCollisions(item);
+    };
+
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', stop);
+    window.addEventListener('touchmove', move, { passive: false });
+    window.addEventListener('touchend', stop);
+}
+
+function checkCollisions(movedItem) {
+    const threshold = 60;
+    const other = state.activeElements.find(el => {
+        if (el.uid === movedItem.uid) return false;
+        const dx = el.x - movedItem.x;
+        const dy = el.y - movedItem.y;
+        return Math.sqrt(dx * dx + dy * dy) < threshold;
+    });
+
+    if (other) {
+        void combineAsync(movedItem, other);
+    }
+}
+
+async function combineAsync(a, b) {
+    const comboKey = [a.id, b.id].sort().join('+');
+    const result = state.recipes[comboKey];
+
+    const oldA = { ...a };
+    const oldB = { ...b };
+
+    if (result) {
+        state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
+        const midX = (a.x + b.x) / 2;
+        const midY = (a.y + b.y) / 2;
+
+        if (!state.library.find((el) => el.id === result.id)) {
+            state.library.push({
+                id: result.id,
+                emoji: result.emoji,
+                name: result.name
+            });
+            recomputeAllTiers();
+            renderLibrary();
+        }
+
+        const resultData = state.library.find((el) => el.id === result.id);
+        createElementOnCanvas(resultData, midX + 40, midY + 40);
+        showPulse(midX + 40, midY + 40, 'bg-blue-400');
+        renderCanvas();
+        return;
+    }
+
+    state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
+    renderCanvas();
+    showDiscoveryCheckModal();
+    fetchAiPropositions(oldA, oldB)
+        .then((parsed) => {
+            hideDiscoveryCheckModal();
+            openDiscoveryModal(oldA, oldB, comboKey, parsed);
+        })
+        .catch((err) => {
+            console.error(err);
+            hideDiscoveryCheckModal();
+            openDiscoveryModal(oldA, oldB, comboKey);
+        });
+}
+
+/**
+ * @param {unknown} a
+ * @param {unknown} b
+ * @param {string} comboKey
+ * @param {{ suggestions: string[], explanation: string, makesenceYes: boolean | null } | undefined} preloadedParsed
+ */
+function openDiscoveryModal(a, b, comboKey, preloadedParsed) {
+    state.discoveryIconItemName = '';
+    state.pendingCombination = { a, b, key: comboKey };
+    const la = promptPartsFromItem(a);
+    const lb = promptPartsFromItem(b);
+    const modalRecipe = document.getElementById('modal-recipe-text');
+    if (modalRecipe) {
+        modalRecipe.innerText = `You combined ${la.text} and ${lb.text} and created something new!`;
+    }
+    if (discoveryTitleEl) {
+        const eA = la.icon || '✨';
+        const eB = lb.icon || '';
+        discoveryTitleEl.textContent = `${eA}${eB} New Discovery!`;
+    }
+    state.discoverySelectedName = '';
+    syncDiscoverySelectedNameUi();
+    if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = true;
+    state.aiSuggestions = [];
+    if (aiWrap) aiWrap.classList.remove('hidden');
+    if (aiStatus) aiStatus.textContent = '';
+    clearAiFullReplyUi();
+    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+    if (aiSuggestionsEl) aiSuggestionsEl.innerHTML = '';
+    resetDiscoveryAiImagePreview();
+    modal.classList.remove('hidden');
+    setDiscoveryStep('name');
+    if (preloadedParsed) {
+        applyDiscoveryAiResult(preloadedParsed);
+    } else {
+        startAiForCombination(a, b);
+    }
+}
+
+if (discoveryAiImageBtn) {
+    discoveryAiImageBtn.addEventListener('click', () => {
+        void generateDiscoveryIconPreview();
+    });
+}
+
+if (discoveryApplyIconUrlBtn) {
+    discoveryApplyIconUrlBtn.addEventListener('click', () => {
+        void applyDiscoveryIconFromUrl();
+    });
+}
+
+if (discoveryIconUrlInput) {
+    discoveryIconUrlInput.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            void applyDiscoveryIconFromUrl();
+        }
+    });
+}
+
+if (discoveryTakeIconBtn) {
+    discoveryTakeIconBtn.addEventListener('click', async () => {
+        const itemId = state.discoveryIconItemId;
+        const url = state.discoveryPreviewUrl;
+        if (!itemId || !url) return;
+        discoveryTakeIconBtn.disabled = true;
+        try {
+            const out = await postSaveItemIconRemote(itemId, url);
+            if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
+                persistIconPathForItem(itemId, out.iconPath.trim());
+            }
+            await reloadCatalogFromApi();
+            if (discoveryAiImageStatus) {
+                discoveryAiImageStatus.textContent = 'Icon saved to images/ and catalog.';
+            }
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = msg.slice(0, 280);
+        } finally {
+            if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = !state.discoveryPreviewUrl;
+        }
+    });
+}
+
+if (discoveryImageDoneBtn) {
+    discoveryImageDoneBtn.addEventListener('click', () => {
+        setDiscoveryStep('name');
+        state.discoveryIconItemName = '';
+        if (aiWrap) aiWrap.classList.add('hidden');
+        clearAiFullReplyUi();
+        if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+        if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+        resetDiscoveryAiImagePreview();
+        modal.classList.add('hidden');
+    });
+}
+
+if (saveDiscoveryBtn) {
+    saveDiscoveryBtn.addEventListener('click', () => {
+        void saveDiscoveryAndStartIcon();
+    });
+}
+
+document.getElementById('cancel-discovery').addEventListener('click', () => {
+    hideDiscoveryCheckModal();
+    if (state.factory.factoryDiscoveryCombinerKey) {
+        state.factory.factoryDiscoveryCombinerKey = null;
+        state.pendingCombination = null;
+        state.aiSuggestions = [];
+        state.discoverySelectedName = '';
+        state.discoveryIconItemName = '';
+        if (aiWrap) aiWrap.classList.add('hidden');
+        clearAiFullReplyUi();
+        if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+        if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+        modal.classList.add('hidden');
+        resetDiscoveryAiImagePreview();
+        return;
+    }
+    if (state.pendingCombination) {
+        state.activeElements.push(state.pendingCombination.a);
+        state.activeElements.push(state.pendingCombination.b);
+        state.pendingCombination = null;
+        renderCanvas();
+    }
+    state.aiSuggestions = [];
+    state.discoverySelectedName = '';
+    state.discoveryIconItemName = '';
+    if (aiWrap) aiWrap.classList.add('hidden');
+    clearAiFullReplyUi();
+    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+    resetDiscoveryAiImagePreview();
+    modal.classList.add('hidden');
+});
+
+function showPulse(x, y, colorClass) {
+    const pulse = document.createElement('div');
+    pulse.className = `absolute rounded-full pointer-events-none animate-ping ${colorClass} opacity-75`;
+    pulse.style.left = `${x}px`;
+    pulse.style.top = `${y}px`;
+    pulse.style.width = '100px';
+    pulse.style.height = '100px';
+    pulse.style.transform = 'translate(-50%, -50%)';
+    workspaceEl.appendChild(pulse);
+    setTimeout(() => pulse.remove(), 1000);
+}
+
+clearBtn.addEventListener('click', () => {
+    state.activeElements = [];
+    renderCanvas();
+});
+
+if (tabLabBtn && tabFactoryBtn) {
+    tabLabBtn.addEventListener('click', () => setWorkspace('lab'));
+    tabFactoryBtn.addEventListener('click', () => setWorkspace('factory'));
+}
+
+const toggleInventoryBtn = document.getElementById('toggle-inventory-panel');
+const inventoryPanelEl = document.getElementById('inventory-panel');
+if (toggleInventoryBtn && inventoryPanelEl) {
+    toggleInventoryBtn.addEventListener('click', () => {
+        inventoryPanelEl.classList.toggle('hidden');
+        const open = !inventoryPanelEl.classList.contains('hidden');
+        toggleInventoryBtn.setAttribute('aria-expanded', String(open));
+        requestAnimationFrame(() => {
+            window.dispatchEvent(new Event('resize'));
+            if (state.activeWorkspace === 'factory') {
+                factoryResizeMainCanvas();
+            }
+        });
+    });
+}
+
+const upgradesOpenBtn = document.getElementById('open-upgrades');
+const upgradesCloseBtn = document.getElementById('close-upgrades');
+const upgradesModalEl = document.getElementById('upgrades-modal');
+function setUpgradesModalOpen(open) {
+    if (!upgradesModalEl) return;
+    upgradesModalEl.classList.toggle('hidden', !open);
+    if (open) {
+        updateFactoryUpgradeBar();
+    }
+}
+if (upgradesOpenBtn && upgradesModalEl) {
+    upgradesOpenBtn.addEventListener('click', () => setUpgradesModalOpen(true));
+}
+if (upgradesCloseBtn && upgradesModalEl) {
+    upgradesCloseBtn.addEventListener('click', () => setUpgradesModalOpen(false));
+}
+if (upgradesModalEl) {
+    upgradesModalEl.addEventListener('click', (e) => {
+        if (e.target === upgradesModalEl) setUpgradesModalOpen(false);
+    });
+}
+window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!upgradesModalEl || upgradesModalEl.classList.contains('hidden')) return;
+    setUpgradesModalOpen(false);
+});
+
+if (factoryCanvasEl) {
+    factoryCanvasEl.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+    });
+
+    factoryCanvasEl.addEventListener(
+        'wheel',
+        (e) => {
+            if (state.activeWorkspace !== 'factory') return;
+            e.preventDefault();
+            const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+            factoryZoomAtClientPoint(e.clientX, e.clientY, state.factory.cameraZoom * factor);
+        },
+        { passive: false }
+    );
+
+    factoryCanvasEl.addEventListener('click', (e) => {
+        if (factorySuppressNextFactoryCanvasClick) {
+            e.preventDefault();
+            e.stopPropagation();
+            factorySuppressNextFactoryCanvasClick = false;
+            return;
+        }
+        const hit = factoryPixelToCell(e.clientX, e.clientY);
+        if (!hit) return;
+        factoryHandleCellAction(hit.col, hit.row, e.shiftKey);
+    });
+
+    factoryCanvasEl.addEventListener('pointerdown', (e) => {
+        if (state.activeWorkspace !== 'factory') return;
+        if (e.button !== 0 || e.shiftKey) return;
+        const transporterDrawMode = state.factory.selectedBuilding === 'transporter';
+        const hit = factoryPixelToCell(e.clientX, e.clientY);
+        if (!hit) return;
+        if (transporterDrawMode) {
+            factoryBeltAnchorPointerId = e.pointerId;
+            factoryBeltAnchorCol = hit.col;
+            factoryBeltAnchorRow = hit.row;
+            state.factory.beltDragPreview = [{ col: hit.col, row: hit.row }];
+        } else {
+            factoryCameraPan = {
+                pointerId: e.pointerId,
+                startX: e.clientX,
+                startY: e.clientY,
+                startCamX: state.factory.cameraX,
+                startCamY: state.factory.cameraY,
+                moved: false
+            };
+        }
+        try {
+            factoryCanvasEl.setPointerCapture(e.pointerId);
+        } catch (_) {
+            /* ignore */
+        }
+    });
+
+    factoryCanvasEl.addEventListener('pointermove', (e) => {
+        if (factoryBeltAnchorPointerId === e.pointerId) {
+            const endHit = factoryPixelToCell(e.clientX, e.clientY);
+            if (!endHit) return;
+            const raw = factoryManhattanPath(factoryBeltAnchorCol, factoryBeltAnchorRow, endHit.col, endHit.row);
+            state.factory.beltDragPreview = factoryFilterBeltPath(raw);
+            return;
+        }
+        if (!factoryCameraPan || factoryCameraPan.pointerId !== e.pointerId || !factoryViewLayout) return;
+        const dx = e.clientX - factoryCameraPan.startX;
+        const dy = e.clientY - factoryCameraPan.startY;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            factoryCameraPan.moved = true;
+            state.factory.cameraX = factoryCameraPan.startCamX - dx / factoryViewLayout.stride;
+            state.factory.cameraY = factoryCameraPan.startCamY - dy / factoryViewLayout.stride;
+        }
+    });
+
+    factoryCanvasEl.addEventListener('pointerup', (e) => {
+        if (factoryCameraPan && factoryCameraPan.pointerId === e.pointerId) {
+            const moved = factoryCameraPan.moved;
+            factoryCameraPan = null;
+            if (moved) factorySuppressNextFactoryCanvasClick = true;
+            try {
+                factoryCanvasEl.releasePointerCapture(e.pointerId);
+            } catch (_) {
+                /* ignore */
+            }
+            return;
+        }
+        if (factoryBeltAnchorPointerId !== e.pointerId) return;
+        try {
+            factoryCanvasEl.releasePointerCapture(e.pointerId);
+        } catch (_) {
+            /* ignore */
+        }
+        const scol = factoryBeltAnchorCol;
+        const srow = factoryBeltAnchorRow;
+        factoryBeltAnchorPointerId = null;
+        state.factory.beltDragPreview = null;
+
+        factorySuppressNextFactoryCanvasClick = true;
+
+        const endHit = factoryPixelToCell(e.clientX, e.clientY);
+        if (!endHit) return;
+
+        if (endHit.col === scol && endHit.row === srow) {
+            factoryHandleCellAction(scol, srow, e.shiftKey);
+            return;
+        }
+
+        const raw = factoryManhattanPath(scol, srow, endHit.col, endHit.row);
+        const filtered = factoryFilterBeltPath(raw);
+        if (filtered.length > 0) {
+            const dirs = factoryDirsAlongFilteredPath(filtered, raw);
+            factoryApplyBeltPath(filtered, dirs);
+        }
+    });
+
+    factoryCanvasEl.addEventListener('pointercancel', (e) => {
+        if (factoryCameraPan && factoryCameraPan.pointerId === e.pointerId) {
+            factoryCameraPan = null;
+            factorySuppressNextFactoryCanvasClick = true;
+            return;
+        }
+        if (factoryBeltAnchorPointerId !== e.pointerId) return;
+        factoryBeltAnchorPointerId = null;
+        state.factory.beltDragPreview = null;
+        factorySuppressNextFactoryCanvasClick = true;
+    });
+}
+
+document.querySelectorAll('.factory-build-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        const t = btn.getAttribute('data-factory-building');
+        if (!t || (t !== 'transporter' && t !== 'extractor' && t !== 'combiner' && t !== 'storage')) return;
+        factoryClearBeltLineState();
+        state.factory.selectedBuilding = state.factory.selectedBuilding === t ? null : t;
+        updateFactoryBuildButtons();
+    });
+});
+
+if (factoryClearBuildingsBtn) {
+    factoryClearBuildingsBtn.addEventListener('click', () => {
+        state.factory.placements = {};
+        state.factory.transporterDirs = {};
+        state.factory.combinerDirs = {};
+        state.factory.combinerDiscovery = {};
+        state.factory.factoryDiscoveryCombinerKey = null;
+        state.factory.itemSlides = {};
+        state.factory.cellItems = {};
+        state.factory.cellRejectFlashUntil = {};
+        factoryClearBeltLineState();
+        renderFactoryGrid();
+    });
+}
+
+if (factoryUpgradeSizeBtn) {
+    factoryUpgradeSizeBtn.addEventListener('click', () => {
+        if (state.factory.sizeUpgradeLevel >= MAX_FACTORY_SIZE_LEVEL) return;
+        factoryShiftKeyedMaps(1, 1);
+        state.factory.sizeUpgradeLevel++;
+        state.factory.cameraX += 1;
+        state.factory.cameraY += 1;
+        renderFactoryGrid();
+    });
+}
+
+if (factoryUpgradeSpeedBtn) {
+    factoryUpgradeSpeedBtn.addEventListener('click', () => {
+        if (!factoryCanSpeedUpgrade()) return;
+        const cur = factoryLoopIntervalMs();
+        state.factory.loopMs = Math.max(MIN_FACTORY_LOOP_MS, Math.round(cur * 0.9));
+        restartFactoryLoop();
+        updateFactoryUpgradeBar();
+    });
+}
+
+if (authLoginBtn) {
+    authLoginBtn.addEventListener('click', () => {
+        void runAuthRequest('/api/auth/login');
+    });
+}
+if (authRegisterBtn) {
+    authRegisterBtn.addEventListener('click', () => {
+        void runAuthRequest('/api/auth/register');
+    });
+}
+if (authPasswordInput) {
+    authPasswordInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            void runAuthRequest('/api/auth/login');
+        }
+    });
+}
+if (authLogoutBtn) {
+    authLogoutBtn.addEventListener('click', () => {
+        const oldToken = state.auth.token;
+        state.auth.token = '';
+        state.auth.username = '';
+        applyLoggedInUi();
+        storeSessionToken('');
+        stopFactoryPushLoop();
+        void fetch(`${apiOrigin()}/api/auth/logout`, {
+            method: 'POST',
+            headers: oldToken ? { Authorization: `Bearer ${oldToken}` } : {}
+        }).catch(() => {});
+        setAuthVisible(true);
+    });
+}
+
+window.addEventListener('beforeunload', () => {
+    if (!state.auth.token) return;
+    void fetch(`${apiOrigin()}/api/factory/state`, {
+        method: 'POST',
+        keepalive: true,
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ factory: buildFactoryPayload() })
+    }).catch(() => {});
+});
+
+function handleTouchStartFromLibrary(e, item) {
+    const ghost = document.createElement('div');
+    ghost.className = 'fixed text-4xl pointer-events-none z-50';
+    ghost.innerText = typeof item.emoji === 'string' ? item.emoji : splitLabel(item.name).icon;
+    document.body.appendChild(ghost);
+
+    const move = (me) => {
+        const mt = me.touches[0];
+        ghost.style.left = `${mt.clientX - 20}px`;
+        ghost.style.top = `${mt.clientY - 20}px`;
+    };
+
+    const stop = (ee) => {
+        const et = ee.changedTouches[0];
+        const rect = workspaceEl.getBoundingClientRect();
+        if (
+            et.clientX >= rect.left &&
+            et.clientX <= rect.right &&
+            et.clientY >= rect.top &&
+            et.clientY <= rect.bottom
+        ) {
+            createElementOnCanvas(item, et.clientX, et.clientY);
+        }
+        ghost.remove();
+        window.removeEventListener('touchmove', move);
+        window.removeEventListener('touchend', stop);
+    };
+
+    window.addEventListener('touchmove', move);
+    window.addEventListener('touchend', stop);
+}
+
+async function bootAfterAuth() {
+    await loadGameData();
+    recomputeAllTiers();
+    renderLibrary();
+    renderCanvas();
+    updateFactoryBuildButtons();
+    updateFactoryUpgradeBar();
+}
+
+async function initAuthThenBoot() {
+    applyLoggedInUi();
+    const stored = readStoredSessionToken();
+    if (stored) {
+        state.auth.token = stored;
+        try {
+            const r = await apiFetch('/api/auth/autologin', { method: 'POST' });
+            if (r.ok) {
+                const payload = await r.json();
+                if (payload && payload.username) state.auth.username = String(payload.username);
+                applyLoggedInUi();
+                setAuthVisible(false);
+            } else {
+                state.auth.token = '';
+                storeSessionToken('');
+                setAuthVisible(true);
+            }
+        } catch {
+            state.auth.token = '';
+            storeSessionToken('');
+            setAuthVisible(true);
+        }
+    } else {
+        setAuthVisible(true);
+    }
+    await bootAfterAuth();
+}
+
+initAuthThenBoot().catch((err) => {
+    console.error(err);
+    const instruction = document.getElementById('instruction');
+    if (instruction) {
+        instruction.innerHTML =
+            '<p class="text-center px-8 text-amber-300/90 max-w-md">Could not load items from the API server. Run <code class="text-slate-300">npm start</code> and login first.</p>';
+        instruction.style.display = 'flex';
+        instruction.style.opacity = '1';
+        instruction.style.pointerEvents = 'auto';
+    }
+});

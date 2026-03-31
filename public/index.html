@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Alchemy Crafter</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        body {
+            overflow: hidden;
+            touch-action: none;
+            background-color: #0f172a;
+        }
+        .element-card {
+            cursor: grab;
+            transition: transform 0.1s ease;
+            user-select: none;
+            touch-action: manipulation;
+        }
+        .element-card:active {
+            cursor: grabbing;
+        }
+        .canvas-element {
+            position: absolute;
+            transition: transform 0.05s linear;
+        }
+        #workspace {
+            background-image: radial-gradient(#1e293b 1px, transparent 1px);
+            background-size: 30px 30px;
+        }
+        .factory-world {
+            background: #2a2620;
+        }
+        /* Bottom tools: ~1/3 viewport — lab / factory controls */
+        .bottom-tools-panel {
+            flex: 0 0 33vh;
+            min-height: 11rem;
+            max-height: 45vh;
+            padding-bottom: max(0.35rem, env(safe-area-inset-bottom, 0px));
+        }
+        .top-bar-safe {
+            padding-top: max(0.25rem, env(safe-area-inset-top, 0px));
+            padding-left: max(0.5rem, env(safe-area-inset-left, 0px));
+            padding-right: max(0.5rem, env(safe-area-inset-right, 0px));
+        }
+        /* 10×10 factory inventory grid */
+        .inventory-grid-10 {
+            display: grid;
+            grid-template-columns: repeat(10, minmax(0, 1fr));
+            gap: 3px;
+            width: 100%;
+            max-width: min(100vw - 1rem, 92vw);
+            margin: 0 auto;
+            aspect-ratio: 1;
+            max-height: min(42vh, 92vw);
+            font-size: 9px;
+        }
+        @media (min-width: 640px) {
+            .inventory-grid-10 {
+                font-size: 10px;
+            }
+        }
+        .inv-slot {
+            min-width: 0;
+            min-height: 0;
+            border-radius: 4px;
+            border: 1px solid rgba(51, 65, 85, 0.9);
+            background: rgba(15, 23, 42, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 1px;
+            overflow: hidden;
+        }
+        .inv-slot--empty {
+            border-style: dashed;
+            opacity: 0.45;
+        }
+        .inv-slot--filled {
+            border-color: rgba(71, 85, 105, 1);
+        }
+        .bottom-tools-scroll {
+            touch-action: pan-y;
+            -webkit-overflow-scrolling: touch;
+        }
+        .touch-manipulation {
+            touch-action: manipulation;
+        }
+        .floating-left {
+            position: fixed;
+            left: max(0.5rem, env(safe-area-inset-left, 0px));
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 40;
+        }
+        .floating-left .floating-btn {
+            min-height: 44px;
+            min-width: 44px;
+            padding: 0.5rem 0.8rem;
+            border-radius: 9999px;
+            border: 1px solid rgba(71, 85, 105, 1);
+            background: rgba(15, 23, 42, 0.92);
+            color: rgb(226, 232, 240);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+            backdrop-filter: blur(8px);
+        }
+        .floating-left .floating-btn:active {
+            transform: scale(0.98);
+        }
+        .grid-cols-3 {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        @media (min-width: 640px) {
+            .sm\:grid-cols-4 {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+            }
+        }
+        /* AI-generated icon preview: square box (w-24/h-24 not in prebuilt Tailwind; img has height:auto from reset) */
+        #discovery-ai-image-img {
+            width: 6rem;
+            height: 6rem;
+            max-width: 6rem;
+            max-height: 6rem;
+            object-fit: contain;
+            object-position: center;
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+            box-sizing: border-box;
+        }
+        #discovery-ai-image-grid .discovery-ai-image-choice {
+            aspect-ratio: 1;
+            min-height: 0;
+        }
+        #discovery-ai-image-grid .discovery-ai-image-choice img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            object-position: center;
+        }
+        .library-item-icon-img {
+            width: 2.5rem;
+            height: 2.5rem;
+            object-fit: contain;
+            display: block;
+        }
+        .inv-slot-icon-img {
+            width: 1.25rem;
+            height: 1.25rem;
+            object-fit: contain;
+            display: block;
+        }
+        /* Lab: rejected combo (pair on server blocklist) — no transform (position uses translate on same node) */
+        @keyframes alchemic-reject-feedback {
+            0%, 100% {
+                border-color: rgb(239, 68, 68);
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.65), 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+                filter: brightness(1) saturate(1);
+            }
+            33% {
+                border-color: rgb(252, 165, 165);
+                box-shadow: 0 0 0 14px rgba(239, 68, 68, 0.18), 0 25px 50px -12px rgba(239, 68, 68, 0.2);
+                filter: brightness(1.12) saturate(1.25);
+            }
+            66% {
+                border-color: rgb(248, 113, 113);
+                box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12), 0 25px 50px -12px rgba(0, 0, 0, 0.2);
+                filter: brightness(1.06) saturate(1.1);
+            }
+        }
+        .canvas-element.alchemic-reject-flash {
+            animation: alchemic-reject-feedback 0.5s ease-in-out 2;
+        }
+    </style>
+</head>
+<body class="text-slate-100 font-sans flex flex-col h-screen w-full overflow-hidden">
+    <div id="auth-overlay" class="fixed inset-0 z-[90] bg-slate-950/95 flex items-center justify-center px-4">
+        <div class="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl">
+            <h2 class="text-lg font-bold text-blue-400 mb-1">Multiplayer Login</h2>
+            <p class="text-xs text-slate-400 mb-4">Login or create account to load your own server-side factory.</p>
+            <div class="space-y-3">
+                <input id="auth-username" type="text" autocomplete="username" placeholder="Login name" class="w-full bg-slate-950 border border-slate-600 rounded p-2.5 text-sm text-white outline-none focus:border-blue-500" />
+                <input id="auth-password" type="password" autocomplete="current-password" placeholder="Password" class="w-full bg-slate-950 border border-slate-600 rounded p-2.5 text-sm text-white outline-none focus:border-blue-500" />
+                <p id="auth-status" class="text-xs text-slate-400 min-h-[1.25rem]"></p>
+                <div class="grid grid-cols-2 gap-2">
+                    <button type="button" id="auth-login-btn" class="min-h-[44px] rounded-xl border border-blue-600 bg-blue-700 hover:bg-blue-600 text-sm font-semibold">Login</button>
+                    <button type="button" id="auth-register-btn" class="min-h-[44px] rounded-xl border border-slate-500 bg-slate-700 hover:bg-slate-600 text-sm font-semibold">Register</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top: title + inventory toggle (Android-friendly tap targets) -->
+    <header class="top-bar-safe shrink-0 z-30 flex items-center justify-between gap-2 py-2 px-2 bg-slate-900/95 border-b border-slate-700">
+        <h1 class="text-sm sm:text-base font-bold text-blue-400 truncate min-w-0">Alchemy Crafter</h1>
+        <div class="flex items-center gap-2 shrink-0">
+            <span id="auth-user-pill" class="hidden text-[11px] px-2 py-1 rounded-lg border border-slate-600 bg-slate-800 text-slate-300"></span>
+            <button type="button" id="auth-logout-btn" class="hidden min-h-[44px] px-3 py-2 rounded-xl bg-slate-800 border border-slate-600 text-slate-200 text-sm font-semibold active:bg-slate-700 transition touch-manipulation">
+                Logout
+            </button>
+            <button type="button" id="toggle-inventory-panel" class="shrink-0 min-h-[44px] min-w-[44px] px-4 py-2 rounded-xl bg-slate-800 border border-slate-600 text-slate-200 text-sm font-semibold active:bg-slate-700 transition touch-manipulation" aria-expanded="false" aria-controls="inventory-panel">
+                Storage
+            </button>
+        </div>
+    </header>
+
+    <!-- Collapsible inventory: 10×10 grid at top -->
+    <div id="inventory-panel" class="hidden shrink-0 z-20 border-b border-slate-700 bg-slate-900/98 backdrop-blur-sm shadow-lg max-h-[44vh] flex flex-col overflow-hidden">
+        <div class="px-3 py-1.5 flex items-center justify-between gap-2 border-b border-slate-700/80 shrink-0">
+            <span class="text-[10px] uppercase tracking-wider text-slate-400">Factory inventory</span>
+            <span id="inventory-meta" class="text-[10px] text-slate-500 tabular-nums"></span>
+        </div>
+        <div class="bottom-tools-scroll flex-1 min-h-0 overflow-y-auto py-2 px-2 flex flex-col items-center">
+            <div id="player-inventory" class="inventory-grid-10 text-slate-300" role="grid" aria-label="Factory storage slots">
+                <!-- 10×10 cells from JS -->
+            </div>
+            <p id="player-inventory-overflow" class="hidden text-[10px] text-amber-400/90 mt-2 text-center px-2"></p>
+        </div>
+    </div>
+
+    <!-- Main: Lab canvas or Factory (fills space between top and bottom) -->
+    <div class="relative flex-1 flex flex-col min-h-0 min-w-0 bg-slate-950 overflow-hidden">
+        <div id="workspace" class="relative flex-1 bg-slate-950 overflow-hidden">
+            <div id="instruction" class="absolute inset-0 flex items-center justify-center pointer-events-none opacity-20">
+                <p class="text-xl sm:text-2xl font-light text-center px-4">Drop elements here to start</p>
+            </div>
+        </div>
+        <div id="factory-workspace" class="hidden relative flex-1 flex flex-col min-h-0 factory-world overflow-hidden">
+            <div id="factory-canvas-wrap" class="flex-1 min-h-0 min-w-0 relative overflow-hidden">
+                <canvas id="factory-canvas" class="absolute inset-0 block h-full w-full cursor-crosshair touch-none" width="400" height="300" aria-label="Factory floor"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating factory upgrades button (left) -->
+    <div id="floating-factory-upgrades" class="floating-left hidden">
+        <button type="button" id="open-upgrades" class="floating-btn touch-manipulation" aria-haspopup="dialog" aria-controls="upgrades-modal">
+            Upgrades
+        </button>
+    </div>
+
+    <!-- Bottom ~1/3: former left sidebar — Lab / Factory tabs, library, upgrades, buildings -->
+    <div class="bottom-tools-panel z-10 flex flex-col min-h-0 bg-slate-900 border-t border-slate-700 shadow-[0_-8px_28px_rgba(0,0,0,0.35)]">
+        <div class="p-2 sm:p-3 border-b border-slate-700 bg-slate-800 shrink-0">
+            <div class="flex gap-2">
+                <button type="button" id="tab-lab" class="flex-1 min-h-[44px] py-2.5 px-3 rounded-xl text-sm font-semibold bg-blue-600 text-white transition touch-manipulation">
+                    Lab
+                </button>
+                <button type="button" id="tab-factory" class="flex-1 min-h-[44px] py-2.5 px-3 rounded-xl text-sm font-semibold bg-slate-700 text-slate-300 hover:bg-slate-600 transition touch-manipulation">
+                    Factory
+                </button>
+            </div>
+            <p id="sidebar-hint-lab" class="text-[11px] text-slate-400 mt-2 leading-snug">Drag elements to combine them</p>
+            <p id="sidebar-hint-factory" class="text-[11px] text-slate-400 mt-2 leading-snug hidden">Every cell is a build slot. Green cells sit on a corner source or orthogonally next to one (no diagonal-only coverage). Extractor needs a green cell; each tick it fills adjacent transporters with that material.</p>
+        </div>
+
+        <div id="panel-lab" class="flex-1 flex flex-col min-h-0 bottom-tools-scroll overflow-y-auto">
+            <div id="library" class="p-2 sm:p-3 grid grid-cols-3 sm:grid-cols-4 gap-2 content-start">
+                <!-- Elements will be injected here -->
+            </div>
+            <div class="p-2 sm:p-3 bg-slate-800/90 border-t border-slate-700 shrink-0">
+                <button id="clear-btn" class="w-full min-h-[44px] py-2.5 bg-red-900/30 hover:bg-red-900/50 text-red-400 text-sm font-medium rounded-xl border border-red-800 transition touch-manipulation">
+                    Clear Workspace
+                </button>
+            </div>
+        </div>
+
+        <div id="panel-factory" class="hidden flex-1 flex flex-col min-h-0 bottom-tools-scroll overflow-y-auto">
+            <div class="p-2 sm:p-3 flex-1">
+                <p class="text-[10px] uppercase tracking-wider text-slate-500 mb-2">Buildings</p>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <button type="button" data-factory-building="transporter" class="factory-build-btn w-full flex items-center gap-3 py-3 px-3 rounded-xl border border-slate-600 bg-slate-800 hover:border-amber-500/60 text-left text-sm transition min-h-[3.25rem] touch-manipulation">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 32 32" class="block shrink-0" style="color:#38bdf8;filter:drop-shadow(0 0 6px rgba(56,189,248,0.4))"><path fill="currentColor" stroke="rgba(255,255,255,0.25)" stroke-width="0.5" stroke-linejoin="round" d="M16 5 L27 24 L20 24 L16 17 L12 24 L5 24 Z"/></svg></span>
+                        <span class="font-medium text-slate-200 leading-tight">Transporter</span>
+                    </button>
+                    <button type="button" data-factory-building="extractor" class="factory-build-btn w-full flex items-center gap-3 py-3 px-3 rounded-xl border border-slate-600 bg-slate-800 hover:border-amber-500/60 text-left text-sm transition min-h-[3.25rem] touch-manipulation">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center text-2xl leading-none" aria-hidden="true">⛏</span>
+                        <span class="font-medium text-slate-200 leading-tight">Extractor</span>
+                    </button>
+                    <button type="button" data-factory-building="combiner" class="factory-build-btn w-full flex items-center gap-3 py-3 px-3 rounded-xl border border-slate-600 bg-slate-800 hover:border-amber-500/60 text-left text-sm transition min-h-[3.25rem] touch-manipulation">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center text-2xl leading-none" aria-hidden="true">⚗</span>
+                        <span class="font-medium text-slate-200 leading-tight">Combiner</span>
+                    </button>
+                    <button type="button" data-factory-building="storage" class="factory-build-btn w-full flex items-center gap-3 py-3 px-3 rounded-xl border border-slate-600 bg-slate-800 hover:border-amber-500/60 text-left text-sm transition min-h-[3.25rem] touch-manipulation">
+                        <span class="flex h-10 w-10 shrink-0 items-center justify-center text-2xl leading-none" aria-hidden="true">📦</span>
+                        <span class="font-medium text-slate-200 leading-tight">Storage</span>
+                    </button>
+                </div>
+                <p class="text-[11px] text-slate-500 mt-3 leading-snug">Transporter: press on one cell, release on another to draw an orthogonal belt (no diagonals). Press and release on the same cell = normal place or rotate. Shift+click removes a building. Belts → Storage (inventory). Combiner accepts from any side; set output with the violet arrow (Combiner tool / no tool). Unknown mix shows ! — click to discover.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Factory Upgrades Modal -->
+    <div id="upgrades-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm">
+        <div class="bg-slate-800 rounded-2xl border border-slate-600 shadow-2xl w-full max-w-[min(100%,720px)] mx-3 overflow-hidden">
+            <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                    <h2 class="text-sm font-bold text-slate-200 truncate">Factory Upgrades</h2>
+                    <p class="text-[11px] text-slate-400 leading-snug">Upgrade Size (grid) and Speed (tick interval).</p>
+                </div>
+                <button type="button" id="close-upgrades" class="min-h-[44px] min-w-[44px] px-3 py-2 rounded-xl bg-slate-800 border border-slate-600 text-slate-200 text-sm font-semibold hover:bg-slate-700 transition touch-manipulation" aria-label="Close upgrades">
+                    Close
+                </button>
+            </div>
+            <div class="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div class="rounded-xl border border-slate-600 bg-slate-900/60 p-3 flex flex-col gap-1">
+                    <span class="text-[10px] text-slate-500 uppercase tracking-wide">Size</span>
+                    <span id="factory-upgrade-size-readout" class="text-sm font-mono text-slate-200 tabular-nums">8×8</span>
+                    <span id="factory-upgrade-size-hint" class="text-[11px] text-slate-500 leading-snug">+1 row &amp; col on each side</span>
+                    <button type="button" id="factory-upgrade-size" class="mt-1 min-h-[44px] text-sm py-2 px-3 rounded-xl bg-violet-800/90 hover:bg-violet-700 text-violet-100 border border-violet-600/50 transition disabled:opacity-40 disabled:pointer-events-none touch-manipulation">
+                        Size +1
+                    </button>
+                </div>
+                <div class="rounded-xl border border-slate-600 bg-slate-900/60 p-3 flex flex-col gap-1">
+                    <span class="text-[10px] text-slate-500 uppercase tracking-wide">Speed</span>
+                    <span id="factory-upgrade-speed-readout" class="text-sm font-mono text-slate-200 tabular-nums">500 ms</span>
+                    <span id="factory-upgrade-speed-hint" class="text-[11px] text-slate-500 leading-snug">Loop interval</span>
+                    <button type="button" id="factory-upgrade-speed" class="mt-1 min-h-[44px] text-sm py-2 px-3 rounded-xl bg-teal-800/90 hover:bg-teal-700 text-teal-100 border border-teal-600/50 transition disabled:opacity-40 disabled:pointer-events-none touch-manipulation">
+                        Speed +1
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pre-discovery: loading AI name ideas (no “New Discovery!” yet) -->
+    <div id="discovery-check-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-[60] backdrop-blur-sm px-4" aria-live="polite">
+        <div class="bg-slate-800/95 border border-slate-600 rounded-2xl shadow-2xl max-w-sm w-full p-6 text-center">
+            <p class="text-sm text-slate-200 leading-relaxed">You're the first to combine those — fetching name ideas…</p>
+        </div>
+    </div>
+
+    <!-- Discovery Modal -->
+    <div id="discovery-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm">
+        <div class="bg-slate-800 p-8 rounded-2xl border border-blue-500/50 shadow-2xl max-w-md w-full text-center">
+            <h2 id="discovery-title" class="text-2xl font-bold mb-4">✨ New Discovery!</h2>
+            <div class="space-y-4 text-left">
+                <div id="ai-suggestions-wrap" class="mb-2 hidden">
+                    <div id="ai-suggestions" class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1"></div>
+                </div>
+                <div class="flex gap-3 pt-2">
+                    <button id="cancel-discovery" class="flex-1 py-3 bg-slate-700 hover:bg-slate-600 text-slate-300 font-bold rounded-lg transition transform active:scale-95">
+                        Cancel
+                    </button>
+                    <button id="save-discovery" class="flex-[2] py-3 bg-blue-600 hover:bg-blue-500 font-bold rounded-lg transition transform active:scale-95">
+                        Confirm
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        if (typeof window.ALCHEMIC_API_BASE === 'undefined') {
+            const host = window.location.hostname;
+            const port = window.location.port;
+            const local = host === 'localhost' || host === '127.0.0.1';
+            if (local && port && port !== '3456') {
+                window.ALCHEMIC_API_BASE = 'http://localhost:3456';
+            } else {
+                window.ALCHEMIC_API_BASE = '';
+            }
+        }
+        window.ALCHEMIC_OPENAI_KEY = window.ALCHEMIC_OPENAI_KEY || '';
+    </script>
+    <script src="app.js"></script>
+</body>
+</html>
