@@ -129,22 +129,11 @@ async function apiFetch(path, options) {
 }
 
 async function fetchChatCompletions(body) {
-    const useProxy = useLocalProxy();
-    const url = useProxy
-        ? `${apiOrigin()}/api/chat`
-        : 'https://api.openai.com/v1/chat/completions';
-    const headers = { 'Content-Type': 'application/json' };
-    if (!useProxy) {
-        const key = typeof window !== 'undefined' && window.ALCHEMIC_OPENAI_KEY;
-        if (!key) {
-            throw new Error(
-                'Set window.ALCHEMIC_OPENAI_KEY in config.js, or use localhost with ALCHEMIC_API_BASE pointing at node dev-server (npm start)'
-            );
-        }
-        headers.Authorization = `Bearer ${key}`;
-    }
-    const authAwareHeaders = useProxy ? authHeaders(headers) : headers;
-    const res = await fetch(url, { method: 'POST', headers: authAwareHeaders, body: JSON.stringify(body) });
+    const res = await apiFetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
     if (!res.ok) {
         const t = await res.text();
         throw new Error(t || `${res.status} ${res.statusText}`);
@@ -157,22 +146,11 @@ async function fetchChatCompletions(body) {
  * @param {{ model?: string, prompt: string, n?: number, size?: string, response_format?: string }} body
  */
 async function fetchImageGenerations(body) {
-    const useProxy = useLocalProxy();
-    const url = useProxy
-        ? `${apiOrigin()}/api/images`
-        : 'https://api.openai.com/v1/images/generations';
-    const headers = { 'Content-Type': 'application/json' };
-    if (!useProxy) {
-        const key = typeof window !== 'undefined' && window.ALCHEMIC_OPENAI_KEY;
-        if (!key) {
-            throw new Error(
-                'Set window.ALCHEMIC_OPENAI_KEY in config.js, or use localhost with ALCHEMIC_API_BASE pointing at node dev-server (npm start)'
-            );
-        }
-        headers.Authorization = `Bearer ${key}`;
-    }
-    const authAwareHeaders = useProxy ? authHeaders(headers) : headers;
-    const res = await fetch(url, { method: 'POST', headers: authAwareHeaders, body: JSON.stringify(body) });
+    const res = await apiFetch('/api/images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
     if (!res.ok) {
         const t = await res.text();
         throw new Error(t || `${res.status} ${res.statusText}`);
@@ -521,17 +499,36 @@ function formatOutgoingAiPreview(req) {
     return `${req.systemContent}\n\n${req.userPrompt}`;
 }
 
-async function fetchAiPropositions(itemA, itemB, precomposed) {
-    const { messages } = precomposed ?? composeAiDiscoveryRequest(itemA, itemB);
-
-    const data = await fetchChatCompletions({
-        model: 'gpt-4o-mini',
-        temperature: 0.75,
-        messages
+async function fetchAiPropositions(itemA, itemB) {
+    const la = promptPartsFromItem(itemA);
+    const lb = promptPartsFromItem(itemB);
+    const res = await apiFetch('/api/discovery/suggestions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            itemA: { name: la.text.trim(), emoji: la.icon.trim() },
+            itemB: { name: lb.text.trim(), emoji: lb.icon.trim() }
+        })
     });
-
-    const content = data.choices?.[0]?.message?.content;
-    return parseAiDiscoveryReply(content);
+    const t = await res.text();
+    if (!res.ok) throw new Error(t || `${res.status} ${res.statusText}`);
+    let payload = null;
+    try {
+        payload = JSON.parse(t);
+    } catch {
+        payload = null;
+    }
+    if (!payload || typeof payload !== 'object') {
+        throw new Error('Invalid discovery suggestions response');
+    }
+    return {
+        suggestions: Array.isArray(payload.suggestions) ? payload.suggestions : [],
+        explanation: typeof payload.explanation === 'string' ? payload.explanation : '',
+        makesenceYes:
+            typeof payload.makesenceYes === 'boolean' || payload.makesenceYes === null
+                ? payload.makesenceYes
+                : null
+    };
 }
 
 /** @param {Record<string, number>} deltas item id → amount to add */
@@ -1586,11 +1583,8 @@ function renderAiSuggestions() {
 }
 
 function runDiscoveryAi(a, b) {
-    const req = composeAiDiscoveryRequest(a, b);
-    if (aiOutgoingEl && aiOutgoingWrap) {
-        aiOutgoingEl.textContent = formatOutgoingAiPreview(req);
-        aiOutgoingWrap.classList.remove('hidden');
-    }
+    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
     clearAiFullReplyUi();
     if (aiStatus) aiStatus.textContent = '';
     if (aiSuggestionsEl) aiSuggestionsEl.innerHTML = '';
@@ -1598,7 +1592,7 @@ function runDiscoveryAi(a, b) {
     state.discoverySelectedName = '';
     syncDiscoverySelectedNameUi();
     updateDiscoverySaveButton();
-    fetchAiPropositions(a, b, req)
+    fetchAiPropositions(a, b)
         .then((parsed) => {
             applyDiscoveryAiResult(parsed);
         })

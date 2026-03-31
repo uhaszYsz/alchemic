@@ -407,6 +407,149 @@ async function proxyOpenAI(req, res, target) {
     res.end(text);
 }
 
+/** @param {string} raw */
+function extractJsonObjectFromAiReply(raw) {
+    let s = String(raw || '').trim();
+    if (!s) return null;
+    const fenceMatch = s.match(/```(?:json)?\s*\n?/i);
+    if (fenceMatch && fenceMatch.index !== undefined) {
+        const after = s.slice(fenceMatch.index + fenceMatch[0].length);
+        const close = after.indexOf('```');
+        if (close !== -1) s = after.slice(0, close).trim();
+    }
+    const start = s.indexOf('{');
+    const end = s.lastIndexOf('}');
+    if (start === -1 || end <= start) return null;
+    s = s.slice(start, end + 1);
+    try {
+        return JSON.parse(s);
+    } catch {
+        try {
+            return JSON.parse(s.replace(/,\s*([}\]])/g, '$1'));
+        } catch {
+            return null;
+        }
+    }
+}
+
+/** @param {string} raw */
+function normalizeSuggestionEmoji(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    const m = s.match(
+        /(?:\p{Extended_Pictographic}(?:\u200D\p{Extended_Pictographic})*[\uFE0F\u{1F3FB}-\u{1F3FF}]?)/u
+    );
+    return m ? m[0] : '';
+}
+
+/** @param {string} raw */
+function stripEmojiClusters(raw) {
+    return String(raw || '')
+        .replace(
+            /(?:\p{Extended_Pictographic}(?:\u200D\p{Extended_Pictographic})*[\uFE0F\u{1F3FB}-\u{1F3FF}]?)/gu,
+            ''
+        )
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * @param {unknown[]} propositions
+ * @returns {{ name: string, emoji: string }[]}
+ */
+function parseDiscoveryPropositions(propositions) {
+    const out = [];
+    const seen = new Set();
+    for (const p of propositions) {
+        let rawName = '';
+        let rawEmoji = '';
+        if (typeof p === 'string') {
+            rawName = stripEmojiClusters(p);
+            rawEmoji = normalizeSuggestionEmoji(p);
+        } else if (p && typeof p === 'object') {
+            rawName = String(p.name ?? '').trim();
+            rawEmoji = String(p.emoji ?? '').trim();
+            if (!rawName && typeof p.label === 'string') {
+                rawName = stripEmojiClusters(p.label);
+                if (!rawEmoji) rawEmoji = normalizeSuggestionEmoji(p.label);
+            }
+        }
+        const name = stripEmojiClusters(rawName).split(/\s+/).filter(Boolean)[0] || '';
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ name, emoji: normalizeSuggestionEmoji(rawEmoji) || '✨' });
+        if (out.length >= 6) break;
+    }
+    return out;
+}
+
+/**
+ * @param {{ itemA: { name: string }, itemB: { name: string } }} input
+ * @returns {{ messages: { role: string, content: string }[] }}
+ */
+function composeDiscoverySuggestionRequest(input) {
+    const itemName1 = String(input?.itemA?.name || '').trim() || 'Item A';
+    const itemName2 = String(input?.itemB?.name || '').trim() || 'Item B';
+    const userPrompt =
+        `Give exactly six name ideas for an element-combining game like Little Alchemy\n\n` +
+        `Combine "${itemName1}" and "${itemName2}" with a coherent imaginative style.\n\n` +
+        `Each proposition must be exactly one word: no spaces, no phrases (use compounds or hyphens if needed, e.g. Sunstone or Red-hot).\n\n` +
+        `Each proposition must include a fitting emoji.\n\n` +
+        `Reply in JSON only (no markdown fences, no text outside the object):\n` +
+        `{\n` +
+        `  "explanation": "Short optional note (e.g. theme of the names).",\n` +
+        `  "propositions": [\n` +
+        `    { "name": "Mud", "emoji": "🟤" },\n` +
+        `    { "name": "Clay", "emoji": "🧱" },\n` +
+        `    { "name": "Brick", "emoji": "🧱" },\n` +
+        `    { "name": "Loam", "emoji": "🌱" },\n` +
+        `    { "name": "Silt", "emoji": "🌫️" },\n` +
+        `    { "name": "Peat", "emoji": "🪵" }\n` +
+        `  ]\n` +
+        `}\n\n` +
+        `propositions must be exactly six distinct entries; each entry must have "name" (single word) and "emoji" (one fitting emoji).`;
+    const systemContent =
+        'Reply with a single valid JSON object only. Keys: explanation (string), propositions (array of exactly six objects: { name, emoji }). name must be one word only (no spaces). emoji must be a fitting emoji. No verdict or boolean about validity.';
+    return {
+        messages: [
+            { role: 'system', content: systemContent },
+            { role: 'user', content: userPrompt }
+        ]
+    };
+}
+
+/**
+ * @param {{ itemA: { name: string }, itemB: { name: string } }} input
+ * @returns {Promise<{ suggestions: { name: string, emoji: string }[], explanation: string, makesenceYes: boolean | null }>}
+ */
+async function fetchDiscoverySuggestions(input) {
+    if (!OPENAI_KEY) throw new Error('Set key.txt (or OPENAI_API_KEY) for discovery suggestions.');
+    const req = composeDiscoverySuggestionRequest(input);
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${OPENAI_KEY}`
+        },
+        body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            temperature: 0.75,
+            messages: req.messages
+        })
+    });
+    const text = await r.text();
+    if (!r.ok) throw new Error(text || `${r.status} ${r.statusText}`);
+    const payload = parseBody(text);
+    const content = payload?.choices?.[0]?.message?.content;
+    const obj = extractJsonObjectFromAiReply(content || '');
+    const props = Array.isArray(obj?.propositions) ? obj.propositions : [];
+    const suggestions = parseDiscoveryPropositions(props);
+    const explanation = typeof obj?.explanation === 'string' ? stripEmojiClusters(obj.explanation) : '';
+    return { suggestions, explanation, makesenceYes: null };
+}
+
 function staticFileFromRoot(urlPath, root) {
     const rel = urlPath.replace(/^\//, '').replace(/\.\./g, '');
     const filePath = path.resolve(root, rel);
@@ -572,6 +715,24 @@ const server = http.createServer((req, res) => {
         proxyOpenAI(req, res, 'https://api.openai.com/v1/chat/completions').catch((err) => {
             send(res, 500, String(err.message || err), CORS_API);
         });
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/discovery/suggestions') {
+        readRequestBody(req)
+            .then(async (raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const aName = String(body?.itemA?.name || '').trim();
+                const bName = String(body?.itemB?.name || '').trim();
+                if (!aName || !bName) return send(res, 400, 'itemA.name and itemB.name required', CORS_API);
+                const out = await fetchDiscoverySuggestions({
+                    itemA: { name: aName },
+                    itemB: { name: bName }
+                });
+                sendJson(res, 200, out, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;
     }
 
