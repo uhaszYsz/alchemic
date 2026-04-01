@@ -78,7 +78,9 @@ const state = {
         username: '',
         factorySyncTimerId: null,
         enteringFactory: false
-    }
+    },
+    /** comboKey -> true; user cancelled naming earlier */
+    deferredDiscoveries: {}
 };
 
 /** Base catalog from DB (merged with live combo index for tier calculation). */
@@ -92,6 +94,10 @@ let globalDiscoveriesExpandedId = '';
 /** @type {Record<string, { id: number, itemId: string, proposalType: 'name'|'image', proposedName?: string, proposedImagePath?: string, createdBy: number, createdAt: string, upvotes: number, downvotes: number, myVote: number }[]>} */
 let discoveryProposalsByItem = {};
 let discoveryProposalTargetItemId = '';
+/** @type {null | { a: any, b: any, key: string, resultId?: string, resultPlaced?: boolean, factoryCombKey?: string, name?: string, emoji?: string }} */
+let deferredDiscoveryPromptPending = null;
+/** Factory cell key -> performance.now() until yellow deferred flash ends */
+const factoryDeferredFlashUntil = {};
 const DISCOVERY_NAME_COLOR_CHOICES = [
     '#f8fafc', '#e2e8f0', '#94a3b8', '#f87171', '#fb7185',
     '#f97316', '#f59e0b', '#facc15', '#a3e635', '#4ade80',
@@ -1151,8 +1157,7 @@ function renderGlobalDiscoveriesPage() {
             right.className = 'ml-2 shrink-0 flex items-center gap-1.5';
             const deleteBtn = document.createElement('button');
             deleteBtn.type = 'button';
-            deleteBtn.className =
-                'min-h-[32px] px-2.5 rounded-md border border-rose-800 bg-rose-900/40 text-rose-200 text-xs font-semibold hover:bg-rose-900/60 transition';
+            deleteBtn.className = 'vote-pill vote-pill--down';
             deleteBtn.setAttribute('data-discovery-delete-btn', '1');
             deleteBtn.setAttribute('data-id', row.id);
             deleteBtn.textContent = 'Delete';
@@ -1178,8 +1183,7 @@ function renderGlobalDiscoveriesPage() {
 
                 const proposalBtn = document.createElement('button');
                 proposalBtn.type = 'button';
-                proposalBtn.className =
-                    'min-h-[32px] px-3 rounded-md border border-fuchsia-400/80 bg-gradient-to-r from-fuchsia-600/70 to-sky-600/70 text-white text-xs font-bold hover:from-fuchsia-500/80 hover:to-sky-500/80 transition shadow';
+                proposalBtn.className = 'vote-pill vote-pill--up';
                 proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
                 proposalBtn.setAttribute('data-id', row.id);
                 proposalBtn.textContent = '🗳️ Vote';
@@ -1305,6 +1309,8 @@ const openGlobalDiscoveriesBtn = document.getElementById('open-global-discoverie
 const floatingDiscoveryAlertWrapEl = document.getElementById('floating-discovery-alert');
 const openLatestDiscoveryBtn = document.getElementById('open-latest-discovery');
 const floatingDiscoveryAlertCountEl = document.getElementById('floating-discovery-alert-count');
+const deferredDiscoveryPromptWrapEl = document.getElementById('floating-deferred-discovery-prompt');
+const openDeferredDiscoveryBtn = document.getElementById('open-deferred-discovery');
 const globalDiscoveriesModalEl = document.getElementById('global-discoveries-modal');
 const closeGlobalDiscoveriesBtn = document.getElementById('close-global-discoveries');
 const globalDiscoveriesCountEl = document.getElementById('global-discoveries-count');
@@ -1770,8 +1776,8 @@ const discoveryNameInputEl = /** @type {HTMLInputElement | null} */ (document.ge
 const discoveryEmojiInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-emoji-input'));
 const discoveryNameColorGridEl = document.getElementById('discovery-name-color-grid');
 
-/** How many icons the image API requests per “Generate icon” run. */
-const DISCOVERY_ICON_VARIANT_COUNT = 1;
+/** How many icon candidates to show for each client-side search. */
+const DISCOVERY_ICON_VARIANT_COUNT = 6;
 
 const AI_REPLY_BASE_CLASS =
     'text-[11px] leading-snug whitespace-pre-wrap break-words max-h-64 overflow-y-auto rounded-lg border p-2.5';
@@ -1831,6 +1837,23 @@ function updateFloatingDiscoveryAlert(blink) {
     }
 }
 
+function setDeferredDiscoveryPrompt(pending) {
+    deferredDiscoveryPromptPending = pending || null;
+    if (!deferredDiscoveryPromptWrapEl) return;
+    deferredDiscoveryPromptWrapEl.classList.toggle('hidden', !deferredDiscoveryPromptPending);
+}
+
+function rememberDeferredDiscovery(pending) {
+    if (!pending || !pending.a || !pending.b) return;
+    const key = String(pending.key || [pending.a.id, pending.b.id].sort().join('+'));
+    if (!key) return;
+    state.deferredDiscoveries[key] = true;
+}
+
+function isDeferredDiscoveryCombo(comboKey) {
+    return !!state.deferredDiscoveries[String(comboKey || '')];
+}
+
 function getDiscoveryExistingItemId() {
     return state.pendingCombination && typeof state.pendingCombination.resultId === 'string'
         ? state.pendingCombination.resultId
@@ -1872,6 +1895,7 @@ function clearDiscoveryAiImageGrid() {
  */
 function selectDiscoveryAiCandidate(url, selectedBtn) {
     state.discoveryPreviewUrl = url;
+    if (discoveryIconUrlInput) discoveryIconUrlInput.value = url;
     if (!discoveryAiImageGridEl) return;
     const choices = discoveryAiImageGridEl.querySelectorAll('.discovery-ai-image-choice');
     choices.forEach((btn) => {
@@ -1938,9 +1962,49 @@ function resetDiscoveryAiImagePreview() {
 }
 
 /** @returns {string} */
-function buildDiscoveryImagePrompt() {
-    const itemName = (state.discoveryIconItemName || '').trim() || 'item';
-    return `Emoji-like image of the object: ${itemName}.`;
+function buildDiscoveryImageQuery() {
+    const itemName = getDiscoveryChosenName() || (state.discoveryIconItemName || '').trim() || 'item';
+    return `${itemName} flat icon`;
+}
+
+/**
+ * Client-side DuckDuckGo image search.
+ * Returns direct image URLs from image result cards.
+ * @param {string} query
+ * @param {number} limit
+ * @returns {Promise<string[]>}
+ */
+async function fetchDuckDuckGoImageCandidates(query, limit) {
+    const q = String(query || '').trim();
+    const max = Math.max(1, Math.min(12, Number(limit || 6) | 0));
+    if (!q) return [];
+    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=images&ia=images`;
+    const pageRes = await fetch(searchUrl);
+    if (!pageRes.ok) throw new Error(`DuckDuckGo page failed: ${pageRes.status}`);
+    const pageHtml = await pageRes.text();
+    const vqdMatch =
+        pageHtml.match(/vqd=['"]([^'"]+)['"]/i) || pageHtml.match(/vqd=([0-9-]+)\&/i);
+    const vqd = vqdMatch && vqdMatch[1] ? String(vqdMatch[1]).trim() : '';
+    if (!vqd) throw new Error('DuckDuckGo token missing in response.');
+    const apiUrl =
+        `https://duckduckgo.com/i.js?o=json&l=wt-wt&p=1` +
+        `&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}`;
+    const imgRes = await fetch(apiUrl, {
+        headers: { Accept: 'application/json' }
+    });
+    if (!imgRes.ok) throw new Error(`DuckDuckGo images failed: ${imgRes.status}`);
+    const payload = await imgRes.json();
+    const rows = Array.isArray(payload && payload.results) ? payload.results : [];
+    const out = [];
+    const seen = new Set();
+    for (const row of rows) {
+        const u = row && typeof row.image === 'string' ? row.image.trim() : '';
+        if (!u || seen.has(u)) continue;
+        seen.add(u);
+        out.push(u);
+        if (out.length >= max) break;
+    }
+    return out;
 }
 
 function setDiscoveryStep(step) {
@@ -1962,36 +2026,24 @@ async function generateDiscoveryIconPreview() {
     }
     clearDiscoveryAiImageGrid();
     try {
-        const prompt = buildDiscoveryImagePrompt();
-        const data = await fetchImageGenerations({
-            model: 'dall-e-2',
-            prompt,
-            n: DISCOVERY_ICON_VARIANT_COUNT,
-            size: '256x256',
-            response_format: 'url'
-        });
-        const rows = Array.isArray(data?.data) ? data.data : [];
-        const urls = rows.map((row) => row && typeof row.url === 'string' && row.url.trim()).filter(Boolean);
+        const query = buildDiscoveryImageQuery();
+        const urls = await fetchDuckDuckGoImageCandidates(query, DISCOVERY_ICON_VARIANT_COUNT);
         if (!urls.length) throw new Error('No image URLs in response');
         renderDiscoveryAiCandidates(urls);
         if (discoveryAiImageStatus) {
-            discoveryAiImageStatus.textContent =
-                'Tap Take icon to save — or Generate icon to try again.';
+            discoveryAiImageStatus.textContent = 'Select one image, then Confirm discovery to save it.';
         }
     } catch (err) {
         let msg = err && typeof err.message === 'string' ? err.message : String(err);
-        try {
-            const j = JSON.parse(msg);
-            if (j?.error?.message) msg = j.error.message;
-        } catch {
-            /* raw */
-        }
         state.discoveryPreviewUrl = '';
         clearDiscoveryAiImageGrid();
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = msg.slice(0, 280);
+        if (discoveryAiImageStatus) {
+            discoveryAiImageStatus.textContent =
+                `Icon search failed. ${msg.slice(0, 220)} (often caused by browser CORS restrictions).`;
+        }
     } finally {
         discoveryAiImageBtn.disabled = false;
-        if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = !state.discoveryPreviewUrl;
+        if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
     }
 }
 
@@ -2044,6 +2096,7 @@ async function savePendingDiscovery(pending, name, emoji, nameColor) {
     pending.name = text;
     pending.emoji = icon;
     pending.nameColor = normalizedColor;
+    if (pending.key) delete state.deferredDiscoveries[String(pending.key)];
     renderLibrary();
     try {
         await postItemUpsertRemote({
@@ -2082,6 +2135,7 @@ async function saveDiscoveryAndStartIcon() {
     }
 
     const itemId = String(pending.resultId || '');
+    const selectedImageUrl = String(state.discoveryPreviewUrl || '').trim();
     state.discoveryIconItemName = text;
     state.discoveryIconItemId = itemId;
     state.pendingCombination = null;
@@ -2097,15 +2151,36 @@ async function saveDiscoveryAndStartIcon() {
         discoveryAiImageImg.removeAttribute('src');
         discoveryAiImageImg.classList.add('hidden');
     }
+    if (itemId && selectedImageUrl) {
+        try {
+            const out = await postSaveItemIconRemote(itemId, selectedImageUrl);
+            if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
+                persistIconPathForItem(itemId, out.iconPath.trim());
+            }
+            await reloadCatalogFromApi();
+            if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Discovery and icon saved.';
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            if (discoveryAiImageStatus) {
+                discoveryAiImageStatus.textContent =
+                    `Discovery saved, icon download failed: ${msg.slice(0, 180)}`;
+            }
+        }
+    } else if (discoveryAiImageStatus) {
+        discoveryAiImageStatus.textContent = 'Discovery saved.';
+    }
     if (saveDiscoveryBtn) {
         saveDiscoveryBtn.disabled = true;
         saveDiscoveryBtn.textContent = 'Saved';
     }
-    if (discoveryAiImageStatus) {
-        discoveryAiImageStatus.textContent = itemId
-            ? 'Discovery saved. Add icon from URL or upload, then close.'
-            : 'Discovery saved.';
-    }
+    setDiscoveryStep('name');
+    state.discoveryIconItemName = '';
+    if (aiWrap) aiWrap.classList.add('hidden');
+    clearAiFullReplyUi();
+    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+    resetDiscoveryAiImagePreview();
+    modal.classList.add('hidden');
 }
 
 async function applyDiscoveryIconFromUrl() {
@@ -2713,6 +2788,21 @@ function openFactoryCombinerDiscovery(combinerKey, aId, bId, comboKey) {
             }
             const a = factoryLibraryStubForId(aId);
             const b = factoryLibraryStubForId(bId);
+            if (isDeferredDiscoveryCombo(comboKey)) {
+                factoryDeferredFlashUntil[combinerKey] = performance.now() + 1000;
+                renderFactoryGrid();
+                setDeferredDiscoveryPrompt({
+                    a,
+                    b,
+                    key: comboKey,
+                    resultId: '',
+                    resultPlaced: false,
+                    factoryCombKey: combinerKey,
+                    name: '',
+                    emoji: '✨'
+                });
+                return;
+            }
             openDiscoveryModal(
                 {
                     a,
@@ -3215,6 +3305,22 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.strokeRect(3 * sc, 3 * sc, w - 6 * sc, h - 6 * sc);
         ctx.restore();
     }
+    const deferredUntil = factoryDeferredFlashUntil[key];
+    if (deferredUntil && performance.now() < deferredUntil) {
+        const pulse = 0.45 + 0.35 * Math.sin(performance.now() * 0.022);
+        ctx.save();
+        ctx.fillStyle = `rgba(251, 191, 36, ${0.1 + 0.12 * pulse})`;
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = `rgba(245, 158, 11, ${0.55 + 0.35 * pulse})`;
+        ctx.lineWidth = Math.max(2, 3.2 * sc);
+        ctx.strokeRect(1.5 * sc, 1.5 * sc, w - 3 * sc, h - 3 * sc);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = fs(18);
+        ctx.fillStyle = `rgba(254, 243, 199, ${0.7 + 0.2 * pulse})`;
+        ctx.fillText('?', midX, midY);
+        ctx.restore();
+    }
     ctx.restore();
 }
 
@@ -3295,6 +3401,9 @@ function factoryDrawFullCanvas() {
 
     for (const k of Object.keys(state.factory.cellRejectFlashUntil)) {
         if (state.factory.cellRejectFlashUntil[k] <= now) delete state.factory.cellRejectFlashUntil[k];
+    }
+    for (const k of Object.keys(factoryDeferredFlashUntil)) {
+        if (factoryDeferredFlashUntil[k] <= now) delete factoryDeferredFlashUntil[k];
     }
 }
 
@@ -3651,6 +3760,33 @@ async function combineAsync(a, b) {
     }
     state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
     renderCanvas();
+    if (isDeferredDiscoveryCombo(comboKey)) {
+        state.activeElements.push(oldA, oldB);
+        renderCanvas();
+        const midX = (a.x + b.x) / 2 + 40;
+        const midY = (a.y + b.y) / 2 + 40;
+        showPulse(midX, midY, 'bg-yellow-400');
+        const q = document.createElement('div');
+        q.className = 'absolute pointer-events-none z-50 text-2xl font-bold text-amber-300';
+        q.textContent = '???';
+        q.style.left = `${midX}px`;
+        q.style.top = `${midY - 36}px`;
+        q.style.transform = 'translate(-50%, -50%)';
+        q.style.textShadow = '0 0 12px rgba(251,191,36,0.8)';
+        workspaceEl.appendChild(q);
+        setTimeout(() => q.remove(), 900);
+        setDeferredDiscoveryPrompt({
+            a: oldA,
+            b: oldB,
+            key: comboKey,
+            resultId: '',
+            resultPlaced: false,
+            factoryCombKey: '',
+            name: '',
+            emoji: '✨'
+        });
+        return;
+    }
     openDiscoveryModal(
         {
             a: oldA,
@@ -3671,6 +3807,7 @@ async function combineAsync(a, b) {
  * @param {{ suggestions: { name: string, emoji: string }[], explanation: string, makesenceYes: boolean | null } | undefined} preloadedParsed
  */
 function openDiscoveryModal(pending, preloadedParsed) {
+    setDeferredDiscoveryPrompt(null);
     state.discoveryIconItemName = '';
     state.pendingCombination = pending;
     state.discoveryNameColor = normalizeItemNameColor(pending && pending.nameColor) || DISCOVERY_NAME_COLOR_CHOICES[0];
@@ -3801,6 +3938,22 @@ function closeDiscoveryModalFromCancelFlow() {
     modal.classList.add('hidden');
 }
 
+/**
+ * For lab discoveries, cancel should revert consumed ingredients.
+ * Factory path keeps combiner unresolved and does not need canvas restore.
+ * @param {{ a?: any, b?: any, factoryCombKey?: string }} pending
+ */
+function restorePendingIngredientsOnCancel(pending) {
+    if (!pending || pending.factoryCombKey) return;
+    const a = pending.a;
+    const b = pending.b;
+    if (!a || !b) return;
+    const existingUids = new Set(state.activeElements.map((el) => String(el.uid || '')));
+    if (!existingUids.has(String(a.uid || ''))) state.activeElements.push({ ...a });
+    if (!existingUids.has(String(b.uid || ''))) state.activeElements.push({ ...b });
+    renderCanvas();
+}
+
 if (rejectDiscoveryBtn) {
     rejectDiscoveryBtn.addEventListener('click', async () => {
         const pending = state.pendingCombination;
@@ -3837,15 +3990,21 @@ if (discoveryEmojiInputEl) {
     });
 }
 
-document.getElementById('cancel-discovery').addEventListener('click', async () => {
+document.getElementById('cancel-discovery').addEventListener('click', () => {
     const pending = state.pendingCombination;
-    if (pending) {
-        const fallbackName = pending.name || makeUnnamedDiscoveryName();
-        const fallbackEmoji = pending.emoji || '✨';
-        await savePendingDiscovery(pending, fallbackName, fallbackEmoji, pending.nameColor || '');
-    }
+    rememberDeferredDiscovery(pending);
+    restorePendingIngredientsOnCancel(pending);
     closeDiscoveryModalFromCancelFlow();
 });
+
+if (openDeferredDiscoveryBtn) {
+    openDeferredDiscoveryBtn.addEventListener('click', () => {
+        if (!deferredDiscoveryPromptPending) return;
+        const pending = deferredDiscoveryPromptPending;
+        setDeferredDiscoveryPrompt(null);
+        openDiscoveryModal(pending, undefined);
+    });
+}
 
 if (openLatestDiscoveryBtn) {
     openLatestDiscoveryBtn.addEventListener('click', () => {
@@ -4463,7 +4622,9 @@ if (authLogoutBtn) {
         state.auth.token = '';
         state.auth.username = '';
         state.pendingDiscoveryNotices = [];
+        state.deferredDiscoveries = {};
         state.pendingCombination = null;
+        setDeferredDiscoveryPrompt(null);
         updateFloatingDiscoveryAlert(false);
         applyLoggedInUi();
         storeSessionToken('');
@@ -4521,6 +4682,8 @@ function handleTouchStartFromLibrary(e, item) {
 async function bootAfterAuth() {
     await loadGameData();
     state.pendingDiscoveryNotices = [];
+    state.deferredDiscoveries = {};
+    setDeferredDiscoveryPrompt(null);
     updateFloatingDiscoveryAlert(false);
     recomputeAllTiers();
     renderLibrary();

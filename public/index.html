@@ -390,6 +390,11 @@
     <div id="floating-clear-workspace" class="floating-right">
         <button id="clear-btn" class="floating-btn touch-manipulation">Clear</button>
     </div>
+    <div id="floating-deferred-discovery-prompt" class="hidden fixed left-1/2 -translate-x-1/2 top-[max(4.1rem,env(safe-area-inset-top,0px))] z-[47]">
+        <button type="button" id="open-deferred-discovery" class="min-h-[44px] px-4 py-2 rounded-xl border border-amber-300/80 bg-amber-600/80 text-amber-50 text-sm font-semibold shadow-2xl backdrop-blur-sm touch-manipulation">
+            Discovered earlier. Want to name it?
+        </button>
+    </div>
 
     <!-- Bottom ~1/3: former left sidebar — Lab / Factory tabs, library, upgrades, buildings -->
     <div class="bottom-tools-panel z-10 flex flex-col min-h-0 bg-slate-900 border-t border-slate-700 shadow-[0_-8px_28px_rgba(0,0,0,0.35)]">
@@ -579,6 +584,19 @@
                 </div>
                 <div class="pt-1">
                     <span class="block text-[11px] uppercase tracking-wide text-slate-400 mb-1">Icon image</span>
+                    <div class="mb-2">
+                        <button id="discovery-ai-image-btn" class="w-full py-2.5 px-3 bg-indigo-700 hover:bg-indigo-600 text-indigo-100 text-sm font-semibold rounded-lg transition">
+                            Search icons
+                        </button>
+                    </div>
+                    <div id="discovery-ai-image-grid" class="hidden grid grid-cols-3 gap-2 mb-2">
+                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 1" loading="lazy" /></button>
+                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 2" loading="lazy" /></button>
+                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 3" loading="lazy" /></button>
+                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 4" loading="lazy" /></button>
+                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 5" loading="lazy" /></button>
+                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 6" loading="lazy" /></button>
+                    </div>
                     <div class="flex gap-2">
                         <input id="discovery-icon-url" type="url" placeholder="https://example.com/icon.png" class="flex-1 bg-slate-800/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
                         <button id="discovery-apply-icon-url" class="py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold rounded-lg transition">
