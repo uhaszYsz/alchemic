@@ -1,3 +1,5 @@
+import { simulateFactoryStep } from './factory-core.mjs';
+
 // Game State: items and recipes from SQLite via GET /api/items; discoveries sync with POST /api/items/upsert.
 // No localStorage — inventory is session memory only.
 /** Base factory width/height before size upgrades */
@@ -2207,7 +2209,8 @@ function factoryNeighborColRow(col, row, dir) {
 
 /** @param {number} col @param {number} row */
 function factoryInBounds(col, row) {
-    return Number.isFinite(col) && Number.isFinite(row);
+    const n = factoryGridCols();
+    return Number.isFinite(col) && Number.isFinite(row) && col >= 0 && row >= 0 && col < n && row < n;
 }
 
 /**
@@ -2256,162 +2259,27 @@ function factoryRunSimTick() {
     for (const k of Object.keys(state.factory.itemSlides)) {
         if (!state.factory.cellItems[k]) delete state.factory.itemSlides[k];
     }
-
-    /** @type {Record<string, string>} */
-    const work = {};
-    for (const [k, v] of Object.entries(state.factory.cellItems)) {
-        if (typeof v === 'string' && v.trim()) work[k] = v.trim();
-    }
-    for (const dk of Object.keys(state.factory.combinerDiscovery)) {
-        delete work[dk];
-    }
-
-    for (const [key, p] of Object.entries(state.factory.placements)) {
-        if (p !== 'extractor') continue;
-        const parts = key.split(',');
-        const c = Number(parts[0]);
-        const r = Number(parts[1]);
-        if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
-        const resId = factoryCellResourceId(c, r);
-        if (!resId) continue;
-        for (let dir = 0; dir < 4; dir++) {
-            const nb = factoryNeighborColRow(c, r, dir);
-            if (!factoryInBounds(nb.col, nb.row)) continue;
-            const tk = factoryPlacementKey(nb.col, nb.row);
-            if (state.factory.placements[tk] !== 'transporter') continue;
-            if (work[tk]) continue;
-            work[tk] = resId;
-            factoryRecordItemSlide(tk, key, slideDur, slideT);
+    const out = simulateFactoryStep(state.factory, {
+        inBounds: (col, row) => factoryInBounds(col, row),
+        getResourceId: (col, row) => factoryCellResourceId(col, row),
+        getTransporterDir: (key) => factoryTransporterDir(key),
+        getCombinerDir: (key) => factoryCombinerDir(key),
+        resolveRecipeId: (a, b) => {
+            const comboKey = [a, b].sort().join('+');
+            const result = state.recipes[comboKey];
+            return result && typeof result.id === 'string' ? result.id : null;
         }
+    });
+    const moveLike = [...(out.spawns || []), ...(out.movesTT || []), ...(out.movesToEmptyCombiner || [])];
+    for (const mv of moveLike) {
+        if (!mv || !mv.from || !mv.to) continue;
+        factoryRecordItemSlide(mv.to, mv.from, slideDur, slideT);
     }
-
-    /** @type {{ from: string, id: string }[]} */
-    const deposits = [];
-    /** @type {{ from: string, to: string, id: string }[]} */
-    const movesTT = [];
-    /** @type {{ from: string, to: string, id: string }[]} */
-    const movesToEmptyCombiner = [];
-    /** @type {{ from: string, to: string, incoming: string }[]} */
-    const combinerFeeds = [];
-
-    for (const [key, p] of Object.entries(state.factory.placements)) {
-        if (p !== 'transporter') continue;
-        const parts = key.split(',');
-        const col = Number(parts[0]);
-        const row = Number(parts[1]);
-        if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
-        const itemId = work[key];
-        if (!itemId) continue;
-        const tdir = factoryTransporterDir(key);
-        const nb = factoryNeighborColRow(col, row, tdir);
-        if (!factoryInBounds(nb.col, nb.row)) continue;
-        const destKey = factoryPlacementKey(nb.col, nb.row);
-        const destPl = state.factory.placements[destKey];
-        if (destPl === 'storage') {
-            deposits.push({ from: key, id: itemId });
-        } else if (destPl === 'transporter' && !work[destKey]) {
-            movesTT.push({ from: key, to: destKey, id: itemId });
-        } else if (destPl === 'combiner') {
-            if (!factoryCombinerCanAcceptFrom(destKey, key)) continue;
-            if (state.factory.combinerDiscovery[destKey]) continue;
-            if (!work[destKey]) {
-                movesToEmptyCombiner.push({ from: key, to: destKey, id: itemId });
-            } else if (work[destKey] !== itemId) {
-                combinerFeeds.push({ from: key, to: destKey, incoming: itemId });
-            }
-        }
+    for (const c of out.combined || []) {
+        if (!c || !c.combinerKey || !c.outKey) continue;
+        factoryClearSlidesTouchingKey(c.combinerKey);
+        factoryRecordItemSlide(c.outKey, c.combinerKey, slideDur, slideT);
     }
-
-    /** @type {Record<string, number>} */
-    const invDelta = {};
-    for (const dep of deposits) {
-        if (!work[dep.from]) continue;
-        delete work[dep.from];
-        invDelta[dep.id] = (invDelta[dep.id] || 0) + 1;
-    }
-    // Inventory is server-authoritative. Client simulation should not mutate it locally.
-
-    movesTT.sort((a, b) => a.from.localeCompare(b.from));
-    const destClaimed = new Set();
-    const fromClaimed = new Set();
-    for (const m of movesTT) {
-        if (destClaimed.has(m.to) || fromClaimed.has(m.from)) continue;
-        destClaimed.add(m.to);
-        fromClaimed.add(m.from);
-        delete work[m.from];
-        work[m.to] = m.id;
-        factoryRecordItemSlide(m.to, m.from, slideDur, slideT);
-    }
-
-    movesToEmptyCombiner.sort((a, b) => a.from.localeCompare(b.from));
-    for (const m of movesToEmptyCombiner) {
-        if (destClaimed.has(m.to) || fromClaimed.has(m.from)) continue;
-        if (work[m.to]) continue;
-        if (state.factory.combinerDiscovery[m.to]) continue;
-        destClaimed.add(m.to);
-        fromClaimed.add(m.from);
-        delete work[m.from];
-        work[m.to] = m.id;
-        factoryRecordItemSlide(m.to, m.from, slideDur, slideT);
-    }
-
-    combinerFeeds.sort((a, b) => a.from.localeCompare(b.from));
-    const combinerDestClaimed = new Set();
-    const combinerOutClaimed = new Set();
-    for (const f of combinerFeeds) {
-        if (!work[f.from] || work[f.from] !== f.incoming) continue;
-        if (combinerDestClaimed.has(f.to)) continue;
-        if (fromClaimed.has(f.from)) continue;
-        const existing = work[f.to];
-        if (!existing || existing === f.incoming) continue;
-        if (state.factory.combinerDiscovery[f.to]) continue;
-        const comboKey = [existing, f.incoming].sort().join('+');
-        const result = state.recipes[comboKey];
-        if (result && typeof result.id === 'string') {
-            const parts = f.to.split(',');
-            const c = Number(parts[0]);
-            const r = Number(parts[1]);
-            if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
-            const cdir = factoryCombinerDir(f.to);
-            const nb = factoryNeighborColRow(c, r, cdir);
-            if (!factoryInBounds(nb.col, nb.row)) continue;
-            const outKey = factoryPlacementKey(nb.col, nb.row);
-            if (state.factory.placements[outKey] !== 'transporter') continue;
-            if (work[outKey]) continue;
-            if (destClaimed.has(outKey) || combinerOutClaimed.has(outKey)) continue;
-            combinerDestClaimed.add(f.to);
-            fromClaimed.add(f.from);
-            destClaimed.add(outKey);
-            combinerOutClaimed.add(outKey);
-            delete work[f.from];
-            delete work[f.to];
-            delete state.factory.itemSlides[f.to];
-            delete state.factory.itemSlides[f.from];
-            work[outKey] = result.id;
-            factoryRecordItemSlide(outKey, f.to, slideDur, slideT);
-        } else {
-            combinerDestClaimed.add(f.to);
-            fromClaimed.add(f.from);
-            delete work[f.from];
-            delete work[f.to];
-            delete state.factory.itemSlides[f.to];
-            delete state.factory.itemSlides[f.from];
-            state.factory.combinerDiscovery[f.to] = {
-                a: existing,
-                b: f.incoming,
-                comboKey
-            };
-        }
-    }
-
-    /** @type {typeof state.factory.cellItems} */
-    const next = {};
-    for (const [k, v] of Object.entries(work)) {
-        if (!v) continue;
-        if (state.factory.placements[k] === 'storage') continue;
-        next[k] = v;
-    }
-    state.factory.cellItems = next;
 }
 
 function stopFactoryLoop() {

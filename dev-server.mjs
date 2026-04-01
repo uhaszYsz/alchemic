@@ -33,6 +33,7 @@ import {
     addFactorySnapshoot,
     loadLatestFactorySnapshoot
 } from './db.mjs';
+import { simulateFactoryStep } from './public/factory-core.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3456;
@@ -402,88 +403,21 @@ function factoryRuntimeStatus(state, now = Date.now()) {
 }
 
 function factoryStep(state) {
-    const work = {};
-    for (const [k, v] of Object.entries(state.cellItems || {})) {
-        if (typeof v === 'string' && v) work[k] = v;
+    const out = simulateFactoryStep(state, {
+        inBounds: (col, row) => factoryInBounds(state, col, row),
+        getResourceId: (col, row) => factoryCellResourceId(state, col, row),
+        getTransporterDir: (key) => factoryTransporterDir(state, key),
+        getCombinerDir: (key) => factoryCombinerDir(state, key),
+        resolveRecipeId: (a, b) => recipeIndex[[a, b].sort().join('+')] || null
+    });
+    for (const d of out.deposits || []) {
+        console.log(`[factory-store] transporter=${d.from} storage=${d.to} item=${d.itemId}`);
     }
-    const combinerInputs = {};
-    for (const [key, p] of Object.entries(state.placements || {})) {
-        if (p !== 'extractor') continue;
-        const { col, row } = factoryKeyToColRow(key);
-        const resId = factoryCellResourceId(state, col, row);
-        if (!resId) continue;
-        for (let dir = 0; dir < 4; dir++) {
-            const nb = factoryNeighborColRow(col, row, dir);
-            if (!factoryInBounds(state, nb.col, nb.row)) continue;
-            const tk = factoryPlacementKey(nb.col, nb.row);
-            if (state.placements[tk] !== 'transporter') continue;
-            if (work[tk]) continue;
-            work[tk] = resId;
-            break;
-        }
+    for (const c of out.combined || []) {
+        console.log(`[factory-combine] combiner=${c.combinerKey} a=${c.a} b=${c.b} result=${c.resultId}`);
     }
-    const invDelta = {};
-    for (const [key, p] of Object.entries(state.placements || {})) {
-        if (p !== 'transporter') continue;
-        const itemId = work[key];
-        if (!itemId) continue;
-        const { col, row } = factoryKeyToColRow(key);
-        const dir = factoryTransporterDir(state, key);
-        const nb = factoryNeighborColRow(col, row, dir);
-        if (!factoryInBounds(state, nb.col, nb.row)) continue;
-        const dest = factoryPlacementKey(nb.col, nb.row);
-        const destPl = state.placements[dest];
-        if (destPl === 'storage') {
-            invDelta[itemId] = (invDelta[itemId] || 0) + 1;
-            console.log(`[factory-store] transporter=${key} storage=${dest} item=${itemId}`);
-            delete work[key];
-        } else if (destPl === 'transporter' && !work[dest]) {
-            work[dest] = itemId;
-            delete work[key];
-        } else if (destPl === 'combiner') {
-            if (state.combinerDiscovery && state.combinerDiscovery[dest]) continue;
-            const existing = work[dest];
-            if (!existing) {
-                // First input can wait inside combiner until a matching second input arrives.
-                work[dest] = itemId;
-                delete work[key];
-                continue;
-            }
-            if (existing === itemId) continue;
-            if (!combinerInputs[dest]) combinerInputs[dest] = [];
-            combinerInputs[dest].push({ from: key, itemId });
-        }
-    }
-    for (const k of Object.keys(combinerInputs)) {
-        const arr = combinerInputs[k];
-        if (!arr || arr.length < 1) continue;
-        arr.sort((a, b) => a.from.localeCompare(b.from));
-        const existing = work[k];
-        const incoming = arr[0];
-        if (!existing || !incoming || !incoming.itemId) continue;
-        const a = existing;
-        const b = incoming.itemId;
-        const key = [a, b].sort().join('+');
-        const resultId = recipeIndex[key];
-        if (!resultId) {
-            state.combinerDiscovery[k] = { a, b, comboKey: key };
-            continue;
-        }
-        const { col, row } = factoryKeyToColRow(k);
-        const outDir = factoryCombinerDir(state, k);
-        const nb = factoryNeighborColRow(col, row, outDir);
-        if (!factoryInBounds(state, nb.col, nb.row)) continue;
-        const outKey = factoryPlacementKey(nb.col, nb.row);
-        if (state.placements[outKey] !== 'transporter') continue;
-        if (work[outKey]) continue;
-        work[outKey] = resultId;
-        console.log(`[factory-combine] combiner=${k} a=${a} b=${b} result=${resultId}`);
-        delete work[k];
-        delete work[incoming.from];
-    }
-    state.cellItems = work;
     state.loopTick = (Number(state.loopTick || 0) | 0) + 1;
-    return invDelta;
+    return out.invDelta || {};
 }
 
 function tickAllFactories() {
