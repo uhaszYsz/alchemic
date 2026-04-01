@@ -1218,7 +1218,7 @@ const server = http.createServer((req, res) => {
         if (!auth) return send(res, 401, 'unauthorized', CORS_API);
         const st = getOrInitFactoryState(auth.userId);
         const pending = sanitizeInventoryMap(st._factoryPendingProduced);
-        const canGrant = !!st._factoryRunStoppedAtIso && Object.keys(pending).length > 0;
+        const canGrant = Object.keys(pending).length > 0;
         let granted = {};
         if (canGrant) {
             addToUserInventory(db, auth.userId, pending);
