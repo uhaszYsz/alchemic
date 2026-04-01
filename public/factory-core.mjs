@@ -55,19 +55,23 @@ export function simulateFactoryStep(state, deps) {
     for (const k of Object.keys(state.combinerDiscovery || {})) delete work[k];
 
     const spawns = [];
-    for (const [key, p] of Object.entries(state.placements || {})) {
-        if (p !== 'extractor') continue;
-        const cell = factoryKeyToColRow(key);
-        const resId = getResourceId(cell.col, cell.row);
-        if (!resId) continue;
-        for (let dir = 0; dir < 4; dir++) {
-            const nb = factoryNeighborColRow(cell.col, cell.row, dir);
-            if (!inBounds(nb.col, nb.row)) continue;
-            const tk = factoryPlacementKey(nb.col, nb.row);
-            if (state.placements[tk] !== 'transporter') continue;
-            if (work[tk]) continue;
-            work[tk] = resId;
-            spawns.push({ from: key, to: tk, itemId: resId });
+    const loopTick = Number(state.loopTick || 0) | 0;
+    const extractorTick = (loopTick & 1) === 0;
+    if (extractorTick) {
+        for (const [key, p] of Object.entries(state.placements || {})) {
+            if (p !== 'extractor') continue;
+            const cell = factoryKeyToColRow(key);
+            const resId = getResourceId(cell.col, cell.row);
+            if (!resId) continue;
+            for (let dir = 0; dir < 4; dir++) {
+                const nb = factoryNeighborColRow(cell.col, cell.row, dir);
+                if (!inBounds(nb.col, nb.row)) continue;
+                const tk = factoryPlacementKey(nb.col, nb.row);
+                if (state.placements[tk] !== 'transporter') continue;
+                if (work[tk]) continue;
+                work[tk] = resId;
+                spawns.push({ from: key, to: tk, itemId: resId });
+            }
         }
     }
 

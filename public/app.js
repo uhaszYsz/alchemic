@@ -2346,8 +2346,8 @@ function stopFactoryLoop() {
 
 function onFactoryLoopTick() {
     const now = performance.now();
-    state.factory.loopTick = (state.factory.loopTick | 0) + 1;
     factoryRunSimTick(now);
+    state.factory.loopTick = (state.factory.loopTick | 0) + 1;
     state.factory.loopPulseUntil = now + 120;
 }
 
