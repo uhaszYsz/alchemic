@@ -508,11 +508,12 @@ function composeDiscoverySuggestionRequest(input) {
     const itemName1 = String(input?.itemA?.name || '').trim() || 'Item A';
     const itemName2 = String(input?.itemB?.name || '').trim() || 'Item B';
     const userPrompt =
-        `Give exactly six name ideas for an element-combining game like Little Alchemy\n\n` +
-        `Combine "${itemName1}" and "${itemName2}" with a coherent imaginative style.\n\n` +
-        `Use one word when possible; two words are allowed only when necessary. No long phrases. Compounds or hyphenated names are encouraged (e.g. Sunstone or Red-hot).\n\n` +
-        `Each proposition must include a fitting emoji.\n\n` +
-        `Reply in JSON only (no markdown fences, no text outside the object):\n` +
+        `Give exactly six name ideas for an industry based/civilization/economic game.\n\n` +
+        `What in factory can be built using only or mainly "${itemName1}" and "${itemName2}"??\n\n` +
+        `Use one word when possible; two words are allowed only when necessary.\n` +
+        `No long phrases. Compounds or hyphenated names are encouraged (e.g., Sunstone, Red-hot).\n\n` +
+        `Each proposition must include one fitting emoji.\n\n` +
+        `Reply in JSON only (no markdown fences, no text outside the object), using this exact shape:\n` +
         `{\n` +
         `  "explanation": "Short optional note (e.g. theme of the names).",\n` +
         `  "propositions": [\n` +
@@ -524,7 +525,11 @@ function composeDiscoverySuggestionRequest(input) {
         `    { "name": "Peat", "emoji": "🪵" }\n` +
         `  ]\n` +
         `}\n\n` +
-        `propositions must be exactly six distinct entries; each entry must have "name" (1-2 words) and "emoji" (one fitting emoji).`;
+        `Rules:\n` +
+        `- propositions must contain exactly six distinct entries\n` +
+        `- each entry must have:\n` +
+        `  - "name": 1-2 words\n` +
+        `  - "emoji": exactly one fitting emoji`;
     const systemContent =
         'Reply with a single valid JSON object only. Keys: explanation (string), propositions (array of exactly six objects: { name, emoji }). name must be 1-2 words (prefer one word; no long phrases). emoji must be a fitting emoji. No verdict or boolean about validity.';
     return {
