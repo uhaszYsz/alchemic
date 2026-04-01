@@ -1343,6 +1343,13 @@ function setGlobalDiscoveriesModalOpen(open) {
 function setDbViewerModalOpen(open) {
     if (!dbViewerModalEl) return;
     dbViewerModalEl.classList.toggle('hidden', !open);
+    // Force strict modal behavior: disable interaction with all other root nodes.
+    const roots = Array.from(document.body.children);
+    for (const el of roots) {
+        if (el === dbViewerModalEl) continue;
+        if (open) el.setAttribute('inert', '');
+        else el.removeAttribute('inert');
+    }
 }
 
 function setDbViewerStatus(msg) {
