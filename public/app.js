@@ -378,14 +378,19 @@ function getClientIconDisplaySrc(rawSrc) {
     if (!src) return src;
     let rec = clientProcessedIconCache.get(src);
     if (!rec) {
-        rec = { displaySrc: src, processing: false };
+        rec = { displaySrc: src, processing: false, done: false };
         clientProcessedIconCache.set(src, rec);
     }
-    if (!rec.processing) {
+    if (!rec.processing && !rec.done) {
         rec.processing = true;
         void processIconBackgroundOnClient(src)
             .then((nextSrc) => {
                 if (!nextSrc || nextSrc === src) return;
+                if (rec.displaySrc && rec.displaySrc !== src && String(rec.displaySrc).startsWith('blob:')) {
+                    try {
+                        URL.revokeObjectURL(rec.displaySrc);
+                    } catch {}
+                }
                 rec.displaySrc = nextSrc;
                 // Trigger refresh so existing DOM/canvas starts using processed icon.
                 renderCanvas();
@@ -395,6 +400,7 @@ function getClientIconDisplaySrc(rawSrc) {
             .catch(() => {})
             .finally(() => {
                 rec.processing = false;
+                rec.done = true;
             });
     }
     return rec.displaySrc;
