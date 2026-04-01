@@ -411,12 +411,6 @@ function factoryStep(state) {
         getCombinerDir: (key) => factoryCombinerDir(state, key),
         resolveRecipeId: (a, b) => recipeIndex[[a, b].sort().join('+')] || null
     });
-    for (const d of out.deposits || []) {
-        console.log(`[factory-store] transporter=${d.from} storage=${d.to} item=${d.itemId}`);
-    }
-    for (const c of out.combined || []) {
-        console.log(`[factory-combine] combiner=${c.combinerKey} a=${c.a} b=${c.b} result=${c.resultId}`);
-    }
     state.loopTick = (Number(state.loopTick || 0) | 0) + 1;
     return out.invDelta || {};
 }
@@ -431,7 +425,6 @@ function tickAllFactories() {
                 st._factoryRunStoppedAtIso = new Date(now).toISOString();
                 st._factoryLastProducedPerMinute = st._factoryCurrentProducedPerMinute || {};
             }
-            console.log(`[factory-run-ended] user=${Number(userId) | 0}`);
             st._factoryRunUntilAt = 0;
             st._factoryRunStartedAt = 0;
             persistFactoryState(userId, st);
@@ -454,22 +447,6 @@ function tickAllFactories() {
         while (st._serverAccumulatorMs >= stepMs && guard < 20) {
             st._serverAccumulatorMs -= stepMs;
             const delta = factoryStep(st) || {};
-            const transporters = [];
-            for (const [key, placement] of Object.entries(st.placements || {})) {
-                if (placement !== 'transporter') continue;
-                transporters.push({ key, dir: factoryTransporterDir(st, key) });
-            }
-            transporters.sort((a, b) => a.key.localeCompare(b.key));
-            const items = {};
-            for (const [k, v] of Object.entries(st.cellItems || {})) {
-                if (!k || !v) continue;
-                items[k] = v;
-            }
-            console.log(
-                `[factory-step] user=${Number(userId) | 0} loopTick=${Number(st.loopTick || 0)} transporters=${JSON.stringify(
-                    transporters
-                )} items=${JSON.stringify(items)}`
-            );
             for (const [itemId, qty] of Object.entries(delta)) {
                 totalDelta[itemId] = (totalDelta[itemId] || 0) + (Number(qty) | 0);
             }
@@ -1294,7 +1271,6 @@ const server = http.createServer((req, res) => {
                         ? { ...prev._factoryLastProducedPerMinute }
                         : {};
                 activateFactoryRunWindow(st, Date.now());
-                console.log(`[factory-run-started] user=${auth.userId}`);
                 factoryStateByUser.set(auth.userId, st);
                 persistFactoryState(auth.userId, st);
                 sendJson(
