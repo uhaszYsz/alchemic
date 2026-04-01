@@ -134,35 +134,6 @@ export function simulateFactoryStep(state, deps) {
         sorterPulls.push({ from: chosen.from, to: sorterKey, itemId: chosen.itemId });
     }
 
-    // Bridge: like transporter, but teleports to cell two steps ahead.
-    // Deliberately does not use shared conflict arbitration (claimed sets / round-robin).
-    const bridgeKeys = Object.entries(state.placements || {})
-        .filter(([, p]) => p === 'bridge')
-        .map(([k]) => k)
-        .sort();
-    for (const key of bridgeKeys) {
-        if (spawnedThisTick.has(key)) continue;
-        const itemId = work[key];
-        if (!itemId) continue;
-        const cell = factoryKeyToColRow(key);
-        const dir = getBridgeDir(key);
-        const n1 = factoryNeighborColRow(cell.col, cell.row, dir);
-        const n2 = factoryNeighborColRow(n1.col, n1.row, dir);
-        if (!inBounds(n2.col, n2.row)) continue;
-        const destKey = factoryPlacementKey(n2.col, n2.row);
-        const destPl = state.placements[destKey];
-        if (destPl === 'storage') {
-            deposits.push({ from: key, to: destKey, itemId });
-            bridgeMoves.push({ from: key, to: destKey, itemId });
-            continue;
-        }
-        if (destPl !== 'transporter' && destPl !== 'sorter' && destPl !== 'bridge') continue;
-        if (work[destKey]) continue;
-        delete work[key];
-        work[destKey] = itemId;
-        bridgeMoves.push({ from: key, to: destKey, itemId });
-    }
-
     for (const [key, p] of Object.entries(state.placements || {})) {
         if (p !== 'transporter' && p !== 'sorter') continue;
         // Keep extractor output on its belt cell for one full tick to maintain visible spacing.
@@ -261,6 +232,40 @@ export function simulateFactoryStep(state, deps) {
             }
         }
         if (!progressed) break;
+    }
+
+    // Bridge: like transporter, but teleports to cell two steps ahead.
+    // Run after normal transporter arbitration so it doesn't break regular queue/conflict resolution.
+    // Deliberately does not use shared conflict arbitration (claimed sets / round-robin).
+    const bridgeKeys = Object.entries(state.placements || {})
+        .filter(([, p]) => p === 'bridge')
+        .map(([k]) => k)
+        .sort();
+    for (const key of bridgeKeys) {
+        if (spawnedThisTick.has(key)) continue;
+        const itemId = work[key];
+        if (!itemId) continue;
+        const cell = factoryKeyToColRow(key);
+        const dir = getBridgeDir(key);
+        const n1 = factoryNeighborColRow(cell.col, cell.row, dir);
+        const n2 = factoryNeighborColRow(n1.col, n1.row, dir);
+        if (!inBounds(n2.col, n2.row)) continue;
+        const destKey = factoryPlacementKey(n2.col, n2.row);
+        const destPl = state.placements[destKey];
+        if (destPl === 'storage') {
+            if (work[key] && work[key] === itemId) {
+                delete work[key];
+                invDelta[itemId] = (invDelta[itemId] || 0) + 1;
+                bridgeMoves.push({ from: key, to: destKey, itemId });
+            }
+            continue;
+        }
+        if (destPl !== 'transporter' && destPl !== 'sorter' && destPl !== 'bridge') continue;
+        if (work[destKey]) continue;
+        if (!work[key] || work[key] !== itemId) continue;
+        delete work[key];
+        work[destKey] = itemId;
+        bridgeMoves.push({ from: key, to: destKey, itemId });
     }
 
     const combined = [];
