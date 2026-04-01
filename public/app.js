@@ -3921,6 +3921,37 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.shadowBlur = 2 * sc;
         ctx.fillText(label, w - Math.max(2, 2 * sc), Math.max(1, 1 * sc));
         ctx.restore();
+
+        // Conflict input cursor arrow (0 right, 1 up, 2 left, 3 down) if defined.
+        const ttCursor =
+            state.factory &&
+            state.factory._ttInputCursor &&
+            typeof state.factory._ttInputCursor === 'object' &&
+            Number.isFinite(Number(state.factory._ttInputCursor[key]))
+                ? ((Number(state.factory._ttInputCursor[key]) | 0) + 4) % 4
+                : null;
+        if (ttCursor !== null) {
+            const angleByInputDir = {
+                0: 0,
+                1: -Math.PI / 2,
+                2: Math.PI,
+                3: Math.PI / 2
+            };
+            ctx.save();
+            ctx.translate(midX, Math.max(5 * sc, h * 0.18));
+            ctx.rotate(angleByInputDir[ttCursor]);
+            ctx.fillStyle = '#7dd3fc';
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = Math.max(0.8, sc * 0.9);
+            ctx.beginPath();
+            ctx.moveTo(5.4 * sc, 0);
+            ctx.lineTo(-2.6 * sc, -3.4 * sc);
+            ctx.lineTo(-2.6 * sc, 3.4 * sc);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+        }
     } else if (placement === 'bridge') {
         const bDir = factoryBridgeDir(key);
         const angle = (bDir * Math.PI) / 2;
