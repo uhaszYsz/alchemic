@@ -261,6 +261,47 @@ export function listDependentItems(db, itemId) {
 }
 
 /**
+ * Top discoveries by vote activity for one user.
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @param {number} limit
+ * @returns {{ id: string, emoji: string, name: string, iconPath?: string, upvotes: number, downvotes: number, totalVotes: number }[]}
+ */
+export function listTopDiscoveriesByUser(db, userId, limit = 20) {
+    const uid = Number(userId) | 0;
+    if (!uid) return [];
+    const lim = Math.max(1, Math.min(100, Number(limit || 20) | 0));
+    const rows = db
+        .prepare(
+            `SELECT
+                id,
+                emoji,
+                name,
+                icon_path,
+                COALESCE(upvotes, 0) AS upvotes,
+                COALESCE(downvotes, 0) AS downvotes,
+                (COALESCE(upvotes, 0) + COALESCE(downvotes, 0)) AS total_votes
+             FROM items
+             WHERE discovered_by = @uid
+             ORDER BY total_votes DESC, upvotes DESC, discovered_at DESC, name COLLATE NOCASE
+             LIMIT @lim`
+        )
+        .all({ uid, lim });
+    return rows.map((r) => {
+        const out = {
+            id: String(r.id || ''),
+            emoji: String(r.emoji || '✨'),
+            name: String(r.name || ''),
+            upvotes: Number(r.upvotes || 0) | 0,
+            downvotes: Number(r.downvotes || 0) | 0,
+            totalVotes: Number(r.total_votes || 0) | 0
+        };
+        if (r.icon_path) out.iconPath = String(r.icon_path);
+        return out;
+    });
+}
+
+/**
  * Delete an item and related proposal/rejected-craft rows.
  * @param {import('better-sqlite3').Database} db
  * @param {string} itemId

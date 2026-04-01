@@ -1064,6 +1064,20 @@ async function postDbDeleteRow(table, identity) {
 }
 
 /**
+ * @returns {Promise<{ username: string, topDiscoveries: { id: string, emoji: string, name: string, iconPath?: string, upvotes: number, downvotes: number, totalVotes: number }[] }>}
+ */
+async function fetchProfileData() {
+    const r = await apiFetch('/api/profile', { method: 'GET' });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return {
+        username: String(out && out.username ? out.username : ''),
+        topDiscoveries: Array.isArray(out && out.topDiscoveries) ? out.topDiscoveries : []
+    };
+}
+
+/**
  * @param {string} itemId
  * @returns {Promise<{ id: number, itemId: string, proposalType: 'name'|'image', proposedName?: string, proposedImagePath?: string, createdBy: number, createdAt: string, upvotes: number, downvotes: number, myVote: number }[]>}
  */
@@ -1353,6 +1367,73 @@ function setDbViewerStatus(msg) {
     if (dbViewerStatusEl) dbViewerStatusEl.textContent = String(msg || '');
 }
 
+function setProfileModalOpen(open) {
+    if (!profileModalEl) return;
+    profileModalEl.classList.toggle('hidden', !open);
+}
+
+function setProfileStatus(msg) {
+    if (profileStatusEl) profileStatusEl.textContent = String(msg || '');
+}
+
+/**
+ * @param {{ id: string, emoji: string, name: string, iconPath?: string, upvotes: number, downvotes: number, totalVotes: number }[]} rows
+ */
+function renderProfileTopGrid(rows) {
+    if (!profileTopGridEl) return;
+    profileTopGridEl.innerHTML = '';
+    const list = Array.isArray(rows) ? rows.slice(0, 20) : [];
+    if (!list.length) {
+        const empty = document.createElement('div');
+        empty.className = 'col-span-full text-xs text-slate-500 p-2';
+        empty.textContent = 'No discoveries yet.';
+        profileTopGridEl.appendChild(empty);
+        return;
+    }
+    list.forEach((row) => {
+        const card = document.createElement('div');
+        card.className = 'rounded-lg border border-slate-700 bg-slate-900/70 p-1.5 text-center min-w-0';
+        const iconWrap = document.createElement('div');
+        iconWrap.className = 'h-8 w-8 mx-auto mb-1 flex items-center justify-center';
+        const src =
+            row && typeof row.iconPath === 'string' && row.iconPath.trim()
+                ? `${apiOrigin()}/${row.iconPath.replace(/^\/+/, '')}`
+                : '';
+        if (src) {
+            const img = document.createElement('img');
+            img.src = src;
+            img.alt = '';
+            img.className = 'max-h-8 max-w-8 object-contain';
+            iconWrap.appendChild(img);
+        } else {
+            iconWrap.classList.add('text-xl');
+            iconWrap.textContent = row && row.emoji ? String(row.emoji) : '✨';
+        }
+        const nameEl = document.createElement('div');
+        nameEl.className = 'text-[10px] text-slate-200 truncate';
+        nameEl.textContent = row && row.name ? String(row.name) : String(row && row.id ? row.id : '');
+        const votesEl = document.createElement('div');
+        votesEl.className = 'text-[10px] text-slate-400';
+        const total = Number(row && row.totalVotes ? row.totalVotes : 0) | 0;
+        votesEl.textContent = `Votes: ${total}`;
+        card.appendChild(iconWrap);
+        card.appendChild(nameEl);
+        card.appendChild(votesEl);
+        profileTopGridEl.appendChild(card);
+    });
+}
+
+async function openProfileModal() {
+    setProfileModalOpen(true);
+    setProfileStatus('Loading profile...');
+    if (profileUsernameEl) profileUsernameEl.textContent = '';
+    renderProfileTopGrid([]);
+    const out = await fetchProfileData();
+    if (profileUsernameEl) profileUsernameEl.textContent = `@${out.username || 'player'}`;
+    renderProfileTopGrid(out.topDiscoveries);
+    setProfileStatus('Top 20 discoveries by vote count.');
+}
+
 function renderDbViewerTableSelect() {
     if (!dbViewerTableSelectEl) return;
     dbViewerTableSelectEl.innerHTML = '';
@@ -1497,6 +1578,7 @@ const authLogoutBtn = document.getElementById('auth-logout-btn');
 const authUserPillEl = document.getElementById('auth-user-pill');
 const openGlobalDiscoveriesBtn = document.getElementById('open-global-discoveries');
 const openDbViewerBtn = document.getElementById('open-db-viewer');
+const openProfileBtn = document.getElementById('open-profile');
 const floatingDiscoveryAlertWrapEl = document.getElementById('floating-discovery-alert');
 const openLatestDiscoveryBtn = document.getElementById('open-latest-discovery');
 const floatingDiscoveryAlertCountEl = document.getElementById('floating-discovery-alert-count');
@@ -1518,6 +1600,11 @@ const dbViewerMetaEl = document.getElementById('db-viewer-meta');
 const dbViewerStatusEl = document.getElementById('db-viewer-status');
 const dbViewerHeadEl = document.getElementById('db-viewer-head');
 const dbViewerBodyEl = document.getElementById('db-viewer-body');
+const profileModalEl = document.getElementById('profile-modal');
+const closeProfileBtn = document.getElementById('close-profile');
+const profileUsernameEl = document.getElementById('profile-username');
+const profileStatusEl = document.getElementById('profile-status');
+const profileTopGridEl = document.getElementById('profile-top-grid');
 const discoveryVoteOptionsModalEl = document.getElementById('discovery-vote-options-modal');
 const closeDiscoveryVoteOptionsBtn = document.getElementById('close-discovery-vote-options');
 const openDiscoveryNameProposalBtn = document.getElementById('open-discovery-name-proposal');
@@ -4371,6 +4458,28 @@ if (dbViewerRefreshBtn) {
     });
 }
 
+if (openProfileBtn) {
+    openProfileBtn.addEventListener('click', async () => {
+        openProfileBtn.disabled = true;
+        try {
+            await openProfileModal();
+        } catch (e) {
+            setProfileStatus(String(e && e.message ? e.message : e).slice(0, 240));
+            setProfileModalOpen(true);
+        } finally {
+            openProfileBtn.disabled = false;
+        }
+    });
+}
+if (closeProfileBtn) {
+    closeProfileBtn.addEventListener('click', () => setProfileModalOpen(false));
+}
+if (profileModalEl) {
+    profileModalEl.addEventListener('click', (e) => {
+        if (e.target === profileModalEl) setProfileModalOpen(false);
+    });
+}
+
 if (globalDiscoveriesListEl) {
     globalDiscoveriesListEl.addEventListener('click', async (ev) => {
         const t = ev.target;
@@ -4683,6 +4792,10 @@ window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (dbViewerModalEl && !dbViewerModalEl.classList.contains('hidden')) {
         setDbViewerModalOpen(false);
+        return;
+    }
+    if (profileModalEl && !profileModalEl.classList.contains('hidden')) {
+        setProfileModalOpen(false);
         return;
     }
     if (discoveryImageProposalModalEl && !discoveryImageProposalModalEl.classList.contains('hidden')) {

@@ -2,6 +2,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import {
     openDb,
@@ -17,6 +18,7 @@ import {
     createDiscoveryProposal,
     listDiscoveryProposalsByItem,
     voteOnDiscoveryProposal,
+    listTopDiscoveriesByUser,
     createUser,
     getUserByUsername,
     getUserById,
@@ -419,6 +421,49 @@ function imageExtFromBuffer(buf) {
     const probe = buf.slice(0, Math.min(buf.length, 512)).toString('utf8').replace(/^\uFEFF/, '').trimStart();
     if (/^<svg[\s>]/i.test(probe) || /^<\?xml[\s\S]*?<svg[\s>]/i.test(probe)) return '.svg';
     return null;
+}
+
+/**
+ * Remove top-left color from non-GIF icons and output PNG with alpha.
+ * @param {Buffer} buf
+ * @param {string} ext
+ * @returns {Promise<{ buf: Buffer, ext: string }>}
+ */
+async function removeTopLeftColorBackground(buf, ext) {
+    if (!buf || ext === '.gif') return { buf, ext };
+    try {
+        const rawOut = await sharp(buf, { animated: false, limitInputPixels: false })
+            .ensureAlpha()
+            .raw()
+            .toBuffer({ resolveWithObject: true });
+        const data = rawOut.data;
+        const info = rawOut.info;
+        if (!data || !info || info.channels < 4) return { buf, ext };
+        const r0 = data[0];
+        const g0 = data[1];
+        const b0 = data[2];
+        const tolerance = 16;
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            if (
+                Math.abs(r - r0) <= tolerance &&
+                Math.abs(g - g0) <= tolerance &&
+                Math.abs(b - b0) <= tolerance
+            ) {
+                data[i + 3] = 0;
+            }
+        }
+        const out = await sharp(data, {
+            raw: { width: info.width, height: info.height, channels: 4 }
+        })
+            .png()
+            .toBuffer();
+        return { buf: out, ext: '.png' };
+    } catch {
+        return { buf, ext };
+    }
 }
 
 function decodeDataUrlToBuffer(dataUrl) {
@@ -961,6 +1006,23 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    if (req.method === 'GET' && pathOnly === '/api/profile') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        const user = getUserById(db, auth.userId);
+        if (!user) return send(res, 404, 'user not found', CORS_API);
+        const topDiscoveries = listTopDiscoveriesByUser(db, auth.userId, 20);
+        return sendJson(
+            res,
+            200,
+            {
+                username: String(user.username || ''),
+                topDiscoveries
+            },
+            CORS_API
+        );
+    }
+
     if (req.method === 'GET' && pathOnly === '/api/factory/state') {
         const auth = authenticate(req);
         if (!auth) return send(res, 401, 'unauthorized', CORS_API);
@@ -1345,22 +1407,16 @@ const server = http.createServer((req, res) => {
                 }
                 await ensureImagesDir();
                 const safe = id.replace(/[^a-zA-Z0-9_-]/g, '_') || 'item';
-                /** @type {Buffer | null} */
-                let buf = null;
-                if (imageDataUrl) {
-                    buf = decodeDataUrlToBuffer(imageDataUrl);
-                    if (!buf) return send(res, 400, 'Invalid imageDataUrl payload.', CORS_API);
-                } else {
-                    const r = await fetch(imageUrl);
-                    if (!r.ok) return send(res, 502, `Failed to fetch image: ${r.status}`, CORS_API);
-                    buf = Buffer.from(await r.arrayBuffer());
-                }
-                const ext = imageExtFromBuffer(buf);
-                if (!ext) return send(res, 400, 'Image must be JPEG, PNG, or GIF.', CORS_API);
+                let buf = await fetchIconBufferFromUrlOrData(imageUrl, imageDataUrl);
+                let ext = imageExtFromBuffer(buf);
+                if (!ext) return send(res, 400, 'Image must be JPEG, PNG, GIF, WEBP, or SVG.', CORS_API);
                 if (strictUserUrl) {
                     const err = validateStrictUserIconBytes(buf, ext);
                     if (err) return send(res, 413, err, CORS_API);
                 }
+                const processed = await removeTopLeftColorBackground(buf, ext);
+                buf = processed.buf;
+                ext = processed.ext;
                 const rel = `images/${safe}${ext}`;
                 await fs.promises.writeFile(path.join(__dirname, rel), buf);
                 setItemIconPath(db, id, rel);
