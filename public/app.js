@@ -1779,6 +1779,7 @@ const discoveryNameColorGridEl = document.getElementById('discovery-name-color-g
 
 /** How many icon candidates to show for each client-side search. */
 const DISCOVERY_ICON_VARIANT_COUNT = 6;
+let lastAutoIconSearchQuery = '';
 
 const AI_REPLY_BASE_CLASS =
     'text-[11px] leading-snug whitespace-pre-wrap break-words max-h-64 overflow-y-auto rounded-lg border p-2.5';
@@ -1896,7 +1897,10 @@ function clearDiscoveryAiImageGrid() {
  */
 function selectDiscoveryAiCandidate(url, selectedBtn) {
     state.discoveryPreviewUrl = url;
-    if (discoveryIconUrlInput) discoveryIconUrlInput.value = url;
+    if (discoveryAiImageImg) {
+        discoveryAiImageImg.src = url;
+        discoveryAiImageImg.classList.remove('hidden');
+    }
     if (!discoveryAiImageGridEl) return;
     const choices = discoveryAiImageGridEl.querySelectorAll('.discovery-ai-image-choice');
     choices.forEach((btn) => {
@@ -1948,6 +1952,7 @@ if (discoveryAiImageGridEl) {
 function resetDiscoveryAiImagePreview() {
     state.discoveryPreviewUrl = '';
     state.discoveryIconItemId = '';
+    lastAutoIconSearchQuery = '';
     if (discoveryAiImageBtn) discoveryAiImageBtn.disabled = false;
     if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
     if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = false;
@@ -2006,6 +2011,13 @@ async function generateDiscoveryIconPreview() {
         discoveryAiImageBtn.disabled = false;
         if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
     }
+}
+
+function autoSearchDiscoveryIconsFromSuggestion() {
+    const query = buildDiscoveryImageQuery();
+    if (!query || query === lastAutoIconSearchQuery) return;
+    lastAutoIconSearchQuery = query;
+    void generateDiscoveryIconPreview();
 }
 
 function upsertDiscoveryLocalRecord(id, emoji, name, nameColor, ingredientA, ingredientB) {
@@ -2295,7 +2307,7 @@ function updateDiscoverySaveButton() {
     if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = !valid;
 }
 
-function setDiscoverySelectedName(name, emoji) {
+function setDiscoverySelectedName(name, emoji, opts) {
     state.discoverySelectedName = String(name || '').trim();
     if (discoveryNameInputEl) discoveryNameInputEl.value = state.discoverySelectedName;
     if (discoveryEmojiInputEl && typeof emoji === 'string') {
@@ -2304,6 +2316,9 @@ function setDiscoverySelectedName(name, emoji) {
     syncDiscoverySelectedNameUi();
     renderAiSuggestions();
     updateDiscoverySaveButton();
+    if (opts && opts.autoSearchImages === true) {
+        autoSearchDiscoveryIconsFromSuggestion();
+    }
 }
 
 function renderAiSuggestions() {
@@ -2338,7 +2353,7 @@ function renderAiSuggestions() {
         btn.appendChild(nameSpan);
         btn.addEventListener('click', () => {
             if (already) return;
-            setDiscoverySelectedName(propName, propEmoji);
+            setDiscoverySelectedName(propName, propEmoji, { autoSearchImages: true });
         });
         aiSuggestionsEl.appendChild(btn);
     });
