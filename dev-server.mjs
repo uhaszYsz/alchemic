@@ -283,8 +283,7 @@ function defaultFactoryState() {
         cameraX: (FACTORY_GRID_BASE - 1) / 2,
         cameraY: (FACTORY_GRID_BASE - 1) / 2,
         cameraZoom: 1,
-        _serverLastTickAt: Date.now(),
-        _serverAccumulatorMs: 0,
+        _serverLastStepAt: Date.now(),
         _factoryLastChangedAt: 0,
         _factoryRunUntilAt: 0,
         _factoryRunStartedAt: 0,
@@ -314,8 +313,7 @@ function sanitizeFactoryState(raw) {
         Math.min(MAX_FACTORY_SIZE_LEVEL, Number(raw.sizeUpgradeLevel || 0) | 0)
     );
     st.loopMs = factoryLoopIntervalMs(st);
-    st._serverLastTickAt = Date.now();
-    st._serverAccumulatorMs = 0;
+    st._serverLastStepAt = Date.now();
     st._factoryLastChangedAt = Number(raw._factoryLastChangedAt || 0) || 0;
     st._factoryRunUntilAt = Number(raw._factoryRunUntilAt || 0) || 0;
     st._factoryRunStartedAt = Number(raw._factoryRunStartedAt || 0) || 0;
@@ -345,6 +343,7 @@ function activateFactoryRunWindow(state, now = Date.now()) {
         state._factoryPendingProduced = {};
     }
     state._factoryCurrentProducedPerMinute = {};
+    state._serverLastStepAt = now;
 }
 
 function addProducedToMinuteStats(state, nowMs, delta) {
@@ -404,7 +403,7 @@ function factoryRuntimeStatus(state, now = Date.now()) {
     };
 }
 
-function factoryStep(state) {
+function factoryStep(state, userId = 0) {
     const out = simulateFactoryStep(state, {
         inBounds: (col, row) => Number.isFinite(col) && Number.isFinite(row),
         getResourceId: (col, row) => factoryCellResourceId(state, col, row),
@@ -412,6 +411,13 @@ function factoryStep(state) {
         getCombinerDir: (key) => factoryCombinerDir(state, key),
         resolveRecipeId: (a, b) => recipeIndex[[a, b].sort().join('+')] || null
     });
+    const combined = Array.isArray(out && out.combined) ? out.combined : [];
+    for (const row of combined) {
+        if (!row || typeof row !== 'object') continue;
+        console.log(
+            `[factory-combine] ts=${new Date().toISOString()} user=${Number(userId) | 0} combiner=${String(row.combinerKey || '')} a=${String(row.a || '')} b=${String(row.b || '')} result=${String(row.resultId || '')}`
+        );
+    }
     state.loopTick = (Number(state.loopTick || 0) | 0) + 1;
     return out.invDelta || {};
 }
@@ -439,24 +445,15 @@ function tickAllFactories() {
             factoryStateByUser.delete(userId);
             continue;
         }
-        const elapsed = Math.max(0, now - Number(st._serverLastTickAt || now));
-        st._serverLastTickAt = now;
-        st._serverAccumulatorMs = Number(st._serverAccumulatorMs || 0) + elapsed;
         const stepMs = factoryLoopIntervalMs(st);
-        let guard = 0;
-        const totalDelta = {};
-        while (st._serverAccumulatorMs >= stepMs && guard < 20) {
-            st._serverAccumulatorMs -= stepMs;
-            const delta = factoryStep(st) || {};
-            for (const [itemId, qty] of Object.entries(delta)) {
-                totalDelta[itemId] = (totalDelta[itemId] || 0) + (Number(qty) | 0);
-            }
-            guard++;
-        }
-        if (Object.keys(totalDelta).length) {
+        const lastStepAt = Number(st._serverLastStepAt || 0);
+        if (!lastStepAt || now - lastStepAt < stepMs) continue;
+        st._serverLastStepAt = now;
+        const delta = factoryStep(st, Number(userId) | 0) || {};
+        if (Object.keys(delta).length) {
             // Persist produced items immediately to DB inventory (server-authoritative).
-            addToUserInventory(db, Number(userId) | 0, totalDelta);
-            addProducedToMinuteStats(st, now, totalDelta);
+            addToUserInventory(db, Number(userId) | 0, delta);
+            addProducedToMinuteStats(st, now, delta);
         }
     }
 }
