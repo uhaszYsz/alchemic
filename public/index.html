@@ -384,6 +384,9 @@
     <div id="floating-clear-workspace" class="floating-right">
         <button id="clear-btn" class="floating-btn touch-manipulation">Clear</button>
     </div>
+    <div id="floating-clear-factory" class="floating-right hidden">
+        <button id="factory-clear-btn" class="floating-btn touch-manipulation">Clear Factory</button>
+    </div>
     <div id="floating-deferred-discovery-prompt" class="hidden fixed left-1/2 -translate-x-1/2 z-[47]" style="top: calc(max(4.8rem, env(safe-area-inset-top, 0px)) + 0.25rem);">
         <button type="button" id="open-deferred-discovery" class="min-h-[44px] px-4 py-2 rounded-xl border border-amber-300/80 bg-amber-600/80 text-amber-50 text-sm font-semibold shadow-2xl backdrop-blur-sm touch-manipulation">
             Discovered earlier. Want to name it?
@@ -478,13 +481,6 @@
             <div class="px-4 py-3 border-b border-slate-700/80 flex items-center justify-between gap-3">
                 <span id="global-discoveries-count" class="text-xs text-slate-400">0 items</span>
                 <div class="flex items-center gap-3">
-                    <label class="text-xs text-slate-400 flex items-center gap-2">
-                        <span>View</span>
-                        <select id="global-discoveries-view" class="bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100">
-                            <option value="tree">Tree</option>
-                            <option value="list">List</option>
-                        </select>
-                    </label>
                     <label class="text-xs text-slate-400 flex items-center gap-2">
                         <span>Sort</span>
                         <select id="global-discoveries-sort" class="bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-slate-100">

@@ -104,7 +104,6 @@ const GLOBAL_DISCOVERIES_PER_PAGE = 50;
 let globalDiscoveriesRows = [];
 let globalDiscoveriesPage = 1;
 let globalDiscoveriesSort = 'datetime';
-let globalDiscoveriesViewMode = 'tree';
 let globalDiscoveriesExpandedId = '';
 let dbViewerTables = [];
 let dbViewerSelectedTable = '';
@@ -1546,223 +1545,20 @@ function renderGlobalDiscoveriesPage() {
     const ordered = [...globalDiscoveriesRows].sort(compareGlobalDiscoveriesRows);
     const total = ordered.length;
     globalDiscoveriesListEl.innerHTML = '';
+    globalDiscoveriesListEl.classList.add('divide-y', 'divide-slate-700/70');
+    globalDiscoveriesListEl.style.overflowX = '';
+    globalDiscoveriesListEl.style.overflowY = '';
     if (!ordered.length) {
         const empty = document.createElement('div');
         empty.className = 'px-4 py-6 text-sm text-slate-400 text-center';
         empty.textContent = 'No items found.';
         globalDiscoveriesListEl.appendChild(empty);
         if (globalDiscoveriesCountEl) globalDiscoveriesCountEl.textContent = '0 items';
-        if (globalDiscoveriesPageEl) globalDiscoveriesPageEl.textContent = globalDiscoveriesViewMode === 'tree' ? 'Tree view' : 'Page 1 / 1';
+        if (globalDiscoveriesPageEl) globalDiscoveriesPageEl.textContent = 'Page 1 / 1';
         if (globalDiscoveriesPrevBtn) globalDiscoveriesPrevBtn.disabled = true;
         if (globalDiscoveriesNextBtn) globalDiscoveriesNextBtn.disabled = true;
         return;
     }
-
-    if (globalDiscoveriesViewMode === 'tree') {
-        globalDiscoveriesListEl.classList.remove('divide-y', 'divide-slate-700/70');
-        globalDiscoveriesListEl.style.overflowX = 'auto';
-        globalDiscoveriesListEl.style.overflowY = 'auto';
-        const byId = new Map(ordered.map((row) => [row.id, row]));
-        /** @type {Record<string, string[]>} */
-        const childrenByParent = {};
-        /** @type {string[]} */
-        const rootIds = [];
-        for (const row of ordered) {
-            const parents = [];
-            if (row.ingredientA && row.ingredientA !== row.id && byId.has(row.ingredientA)) parents.push(row.ingredientA);
-            if (row.ingredientB && row.ingredientB !== row.id && byId.has(row.ingredientB) && !parents.includes(row.ingredientB)) {
-                parents.push(row.ingredientB);
-            }
-            let parentId = '';
-            if (parents.length === 2) parentId = parents[0].localeCompare(parents[1]) <= 0 ? parents[0] : parents[1];
-            else if (parents.length === 1) parentId = parents[0];
-            if (parentId) {
-                if (!childrenByParent[parentId]) childrenByParent[parentId] = [];
-                childrenByParent[parentId].push(row.id);
-            } else {
-                rootIds.push(row.id);
-            }
-        }
-
-        const compareIds = (a, b) => compareGlobalDiscoveriesRows(byId.get(a), byId.get(b));
-        rootIds.sort(compareIds);
-        Object.values(childrenByParent).forEach((ids) => ids.sort(compareIds));
-        /** @type {Record<string, number>} */
-        const depthById = {};
-        /** @type {Record<string, number>} */
-        const xUnitsById = {};
-        /** @type {Record<string, number>} */
-        const leafCountMemo = {};
-        const measureLeafCount = (id, stack) => {
-            if (Number.isFinite(leafCountMemo[id])) return leafCountMemo[id];
-            if (stack.has(id)) return 1;
-            stack.add(id);
-            const kids = childrenByParent[id] || [];
-            if (!kids.length) {
-                leafCountMemo[id] = 1;
-                stack.delete(id);
-                return 1;
-            }
-            let sum = 0;
-            for (const kid of kids) sum += measureLeafCount(kid, stack);
-            leafCountMemo[id] = Math.max(1, sum);
-            stack.delete(id);
-            return leafCountMemo[id];
-        };
-        let xCursor = 0;
-        const placeNode = (id, depth, stack) => {
-            if (stack.has(id)) return;
-            stack.add(id);
-            depthById[id] = Number.isFinite(depthById[id]) ? Math.min(depthById[id], depth) : depth;
-            const kids = childrenByParent[id] || [];
-            if (!kids.length) {
-                if (!Number.isFinite(xUnitsById[id])) xUnitsById[id] = xCursor + 0.5;
-                xCursor += 1;
-                stack.delete(id);
-                return;
-            }
-            const start = xCursor;
-            for (const kid of kids) placeNode(kid, depth + 1, stack);
-            const end = xCursor;
-            xUnitsById[id] = (start + end) / 2;
-            stack.delete(id);
-        };
-
-        rootIds.forEach((id) => {
-            measureLeafCount(id, new Set());
-            placeNode(id, 0, new Set());
-        });
-        for (const row of ordered) {
-            if (!Number.isFinite(xUnitsById[row.id])) {
-                measureLeafCount(row.id, new Set());
-                placeNode(row.id, 0, new Set());
-            }
-        }
-
-        const xStep = 118;
-        const yStep = 116;
-        const r = 26;
-        const padX = 56;
-        const padY = 40;
-        const maxDepth = ordered.reduce((m, row) => Math.max(m, Number(depthById[row.id] || 0)), 0);
-        const maxXUnit = ordered.reduce((m, row) => Math.max(m, Number(xUnitsById[row.id] || 0)), 0);
-        const width = Math.max(520, padX * 2 + maxXUnit * xStep + r * 2);
-        const height = Math.max(300, padY * 2 + maxDepth * yStep + r * 2 + 28);
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.setAttribute('width', String(width));
-        svg.setAttribute('height', String(height));
-        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-        svg.setAttribute('class', 'block');
-        globalDiscoveriesListEl.appendChild(svg);
-
-        // Legend
-        const mkLegend = (x, y, fill, label) => {
-            const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-            c.setAttribute('cx', String(x));
-            c.setAttribute('cy', String(y));
-            c.setAttribute('r', '10');
-            c.setAttribute('fill', fill);
-            c.setAttribute('stroke', 'rgba(71,85,105,0.9)');
-            c.setAttribute('stroke-width', '1.5');
-            svg.appendChild(c);
-            const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            t.setAttribute('x', String(x + 16));
-            t.setAttribute('y', String(y + 4));
-            t.setAttribute('fill', 'rgb(203,213,225)');
-            t.setAttribute('font-size', '12');
-            t.textContent = label;
-            svg.appendChild(t);
-        };
-        mkLegend(20, 20, 'rgb(203,213,225)', 'Internal nodes');
-        mkLegend(170, 20, 'rgb(187,247,208)', 'Leaf nodes');
-
-        /** @type {Record<string, { x: number, y: number }>} */
-        const posById = {};
-        for (const row of ordered) {
-            const x = padX + Number(xUnitsById[row.id] || 0) * xStep;
-            const y = padY + Number(depthById[row.id] || 0) * yStep;
-            posById[row.id] = { x, y };
-        }
-
-        for (const [parentId, kids] of Object.entries(childrenByParent)) {
-            const p = posById[parentId];
-            if (!p) continue;
-            for (const kid of kids) {
-                const c = posById[kid];
-                if (!c) continue;
-                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                line.setAttribute('x1', String(p.x));
-                line.setAttribute('y1', String(p.y + r));
-                line.setAttribute('x2', String(c.x));
-                line.setAttribute('y2', String(c.y - r));
-                line.setAttribute('stroke', 'rgba(148,163,184,0.85)');
-                line.setAttribute('stroke-width', '2');
-                svg.appendChild(line);
-            }
-        }
-
-        for (const row of ordered) {
-            const p = posById[row.id];
-            if (!p) continue;
-            const kids = childrenByParent[row.id] || [];
-            const isLeaf = kids.length === 0;
-            const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-            g.setAttribute('data-discovery-expand-toggle', row.id);
-            g.setAttribute('style', 'cursor:pointer');
-            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-            circle.setAttribute('cx', String(p.x));
-            circle.setAttribute('cy', String(p.y));
-            circle.setAttribute('r', String(r));
-            circle.setAttribute('fill', isLeaf ? 'rgb(187,247,208)' : 'rgb(203,213,225)');
-            circle.setAttribute('stroke', globalDiscoveriesExpandedId === row.id ? 'rgb(59,130,246)' : 'rgba(71,85,105,0.9)');
-            circle.setAttribute('stroke-width', globalDiscoveriesExpandedId === row.id ? '3' : '1.5');
-            g.appendChild(circle);
-
-            const iconText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            iconText.setAttribute('x', String(p.x));
-            iconText.setAttribute('y', String(p.y + 5));
-            iconText.setAttribute('text-anchor', 'middle');
-            iconText.setAttribute('fill', 'rgb(15,23,42)');
-            iconText.setAttribute('font-size', '16');
-            iconText.setAttribute('font-weight', '700');
-            iconText.textContent = row.emoji && row.emoji.trim() ? row.emoji.trim() : (row.name || '?').slice(0, 2).toUpperCase();
-            g.appendChild(iconText);
-
-            const nameText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            nameText.setAttribute('x', String(p.x));
-            nameText.setAttribute('y', String(p.y + r + 16));
-            nameText.setAttribute('text-anchor', 'middle');
-            nameText.setAttribute('fill', row.nameColor || 'rgb(226,232,240)');
-            nameText.setAttribute('font-size', '11');
-            nameText.textContent = String(row.name || row.id).slice(0, 18);
-            g.appendChild(nameText);
-            svg.appendChild(g);
-        }
-
-        if (globalDiscoveriesExpandedId) {
-            const selected = ordered.find((row) => row.id === globalDiscoveriesExpandedId);
-            if (selected) {
-                const detailWrap = document.createElement('div');
-                detailWrap.className = 'mt-3 border-t border-slate-700/80';
-                detailWrap.appendChild(buildGlobalDiscoveryRowElement(selected, 0));
-                globalDiscoveriesListEl.appendChild(detailWrap);
-            }
-        }
-
-        if (globalDiscoveriesCountEl) globalDiscoveriesCountEl.textContent = `${total} item${total === 1 ? '' : 's'}`;
-        if (globalDiscoveriesPageEl) {
-            globalDiscoveriesPageEl.textContent = globalDiscoveriesExpandedId
-                ? 'Tree view (click node to hide/show details)'
-                : 'Tree view (click node for details)';
-        }
-        if (globalDiscoveriesPrevBtn) globalDiscoveriesPrevBtn.disabled = true;
-        if (globalDiscoveriesNextBtn) globalDiscoveriesNextBtn.disabled = true;
-        return;
-    }
-
-    globalDiscoveriesListEl.classList.add('divide-y', 'divide-slate-700/70');
-    globalDiscoveriesListEl.style.overflowX = '';
-    globalDiscoveriesListEl.style.overflowY = '';
 
     const pageCount = Math.max(1, Math.ceil(total / GLOBAL_DISCOVERIES_PER_PAGE));
     globalDiscoveriesPage = Math.max(1, Math.min(pageCount, globalDiscoveriesPage));
@@ -2043,7 +1839,6 @@ const closeGlobalDiscoveriesBtn = document.getElementById('close-global-discover
 const globalDiscoveriesCountEl = document.getElementById('global-discoveries-count');
 const globalDiscoveriesPageEl = document.getElementById('global-discoveries-page');
 const globalDiscoveriesListEl = document.getElementById('global-discoveries-list');
-const globalDiscoveriesViewEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('global-discoveries-view'));
 const globalDiscoveriesSortEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('global-discoveries-sort'));
 const globalDiscoveriesPrevBtn = document.getElementById('global-discoveries-prev');
 const globalDiscoveriesNextBtn = document.getElementById('global-discoveries-next');
@@ -2579,6 +2374,7 @@ function updateFactoryUpgradeBar() {
 }
 const modal = document.getElementById('discovery-modal');
 const clearBtn = document.getElementById('clear-btn');
+const factoryClearBtn = document.getElementById('factory-clear-btn');
 const discoveryTitleEl = document.getElementById('discovery-title');
 const discoverySelectedNameEl = document.getElementById('discovery-selected-name');
 const discoveryStepNameEl = document.getElementById('discovery-step-name');
@@ -4456,11 +4252,15 @@ function setWorkspace(which) {
     const isLab = which === 'lab';
     const floatingUpgrades = document.getElementById('floating-factory-upgrades');
     const floatingClear = document.getElementById('floating-clear-workspace');
+    const floatingFactoryClear = document.getElementById('floating-clear-factory');
     if (floatingUpgrades) {
         floatingUpgrades.classList.toggle('hidden', isLab);
     }
     if (floatingClear) {
         floatingClear.classList.toggle('hidden', !isLab);
+    }
+    if (floatingFactoryClear) {
+        floatingFactoryClear.classList.toggle('hidden', isLab);
     }
     if (tabLabBtn && tabFactoryBtn) {
         tabLabBtn.classList.toggle('is-active', isLab);
@@ -4987,6 +4787,26 @@ clearBtn.addEventListener('click', () => {
     renderCanvas();
 });
 
+if (factoryClearBtn) {
+    factoryClearBtn.addEventListener('click', () => {
+        state.factory.placements = {};
+        state.factory.selectedBuilding = null;
+        state.factory.cellResources = {};
+        state.factory.transporterDirs = {};
+        state.factory.cellItems = {};
+        state.factory.combinerDirs = {};
+        state.factory.combinerDiscovery = {};
+        state.factory.factoryDiscoveryCombinerKey = null;
+        state.factory.itemSlides = {};
+        state.factory.beltDragPreview = null;
+        state.factory.cellRejectFlashUntil = {};
+        factoryClearBeltLineState();
+        updateFactoryBuildButtons();
+        renderFactoryGrid();
+        notifyFactoryStateMutated();
+    });
+}
+
 if (tabLabBtn && tabFactoryBtn) {
     tabLabBtn.addEventListener('click', () => setWorkspace('lab'));
     tabFactoryBtn.addEventListener('click', () => setWorkspace('factory'));
@@ -5278,14 +5098,6 @@ if (globalDiscoveriesSortEl) {
     globalDiscoveriesSortEl.value = globalDiscoveriesSort;
     globalDiscoveriesSortEl.addEventListener('change', () => {
         globalDiscoveriesSort = globalDiscoveriesSortEl.value === 'name' ? 'name' : 'datetime';
-        globalDiscoveriesPage = 1;
-        renderGlobalDiscoveriesPage();
-    });
-}
-if (globalDiscoveriesViewEl) {
-    globalDiscoveriesViewEl.value = globalDiscoveriesViewMode;
-    globalDiscoveriesViewEl.addEventListener('change', () => {
-        globalDiscoveriesViewMode = globalDiscoveriesViewEl.value === 'list' ? 'list' : 'tree';
         globalDiscoveriesPage = 1;
         renderGlobalDiscoveriesPage();
     });

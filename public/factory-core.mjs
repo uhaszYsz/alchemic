@@ -109,6 +109,10 @@ export function simulateFactoryStep(state, deps) {
     movesTT.sort((a, b) => a.from.localeCompare(b.from));
     for (const m of movesTT) {
         if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
+        // Destination may have become occupied earlier in the tick; if so, wait.
+        if (work[m.to]) continue;
+        // Source may have been consumed/changed earlier in the tick; if so, skip.
+        if (!work[m.from] || work[m.from] !== m.itemId) continue;
         claimedDest.add(m.to);
         claimedFrom.add(m.from);
         delete work[m.from];
