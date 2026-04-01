@@ -294,7 +294,9 @@ function defaultFactoryState() {
         _factoryRunStoppedAtIso: null,
         _factoryPendingProduced: {},
         _factoryCurrentProducedPerMinute: {},
-        _factoryLastProducedPerMinute: {}
+        _factoryLastProducedPerMinute: {},
+        _factoryIdleGrantedAtIso: null,
+        _factoryIdleRemainder: {}
     };
 }
 
@@ -335,6 +337,12 @@ function sanitizeFactoryState(raw) {
         typeof raw._factoryLastProducedPerMinute === 'object' && raw._factoryLastProducedPerMinute
             ? raw._factoryLastProducedPerMinute
             : {};
+    st._factoryIdleGrantedAtIso =
+        typeof raw._factoryIdleGrantedAtIso === 'string' && raw._factoryIdleGrantedAtIso.trim()
+            ? raw._factoryIdleGrantedAtIso.trim()
+            : null;
+    st._factoryIdleRemainder =
+        typeof raw._factoryIdleRemainder === 'object' && raw._factoryIdleRemainder ? raw._factoryIdleRemainder : {};
     return st;
 }
 
@@ -347,6 +355,8 @@ function activateFactoryRunWindow(state, now = Date.now()) {
         state._factoryPendingProduced = {};
     }
     state._factoryCurrentProducedPerMinute = {};
+    state._factoryIdleGrantedAtIso = null;
+    state._factoryIdleRemainder = {};
     state._serverLastStepAt = now;
 }
 
@@ -486,6 +496,56 @@ function sanitizeInventoryMap(raw) {
         out[key] = qty;
     }
     return out;
+}
+
+function computeIdleProductionGrant(state, nowMs) {
+    const runUntil = Number(state && state._factoryRunUntilAt ? state._factoryRunUntilAt : 0);
+    if (runUntil > nowMs) return {};
+    const stoppedAtIso =
+        state && typeof state._factoryRunStoppedAtIso === 'string' ? state._factoryRunStoppedAtIso.trim() : '';
+    if (!stoppedAtIso) return {};
+    const stoppedAtMs = Date.parse(stoppedAtIso);
+    if (!Number.isFinite(stoppedAtMs) || stoppedAtMs <= 0) return {};
+    const src =
+        state && state._factoryLastProducedPerMinute && typeof state._factoryLastProducedPerMinute === 'object'
+            ? state._factoryLastProducedPerMinute
+            : {};
+    const totals = {};
+    for (const bucket of Object.values(src)) {
+        if (!bucket || typeof bucket !== 'object') continue;
+        for (const [itemId, qtyRaw] of Object.entries(bucket)) {
+            const qty = Number(qtyRaw) | 0;
+            if (!itemId || qty <= 0) continue;
+            totals[itemId] = (Number(totals[itemId] || 0) | 0) + qty;
+        }
+    }
+    if (Object.keys(totals).length === 0) return {};
+    const baseIso =
+        state && typeof state._factoryIdleGrantedAtIso === 'string' ? state._factoryIdleGrantedAtIso.trim() : '';
+    const baseMsParsed = baseIso ? Date.parse(baseIso) : NaN;
+    const baseMs = Number.isFinite(baseMsParsed) && baseMsParsed > stoppedAtMs ? baseMsParsed : stoppedAtMs;
+    const elapsedMs = Math.max(0, nowMs - baseMs);
+    if (elapsedMs <= 0) return {};
+    const elapsedSeconds = elapsedMs / 1000;
+    const runSeconds = Math.max(1, FACTORY_RUN_WINDOW_MS / 1000);
+    const prevRem = state && state._factoryIdleRemainder && typeof state._factoryIdleRemainder === 'object'
+        ? state._factoryIdleRemainder
+        : {};
+    const nextRem = {};
+    const grant = {};
+    for (const [itemId, totalQty] of Object.entries(totals)) {
+        const perSecond = Number(totalQty) / runSeconds;
+        if (!Number.isFinite(perSecond) || perSecond <= 0) continue;
+        const carry = Number(prevRem[itemId] || 0);
+        const raw = perSecond * elapsedSeconds + (Number.isFinite(carry) && carry > 0 ? carry : 0);
+        const qty = Math.floor(raw);
+        const rem = raw - qty;
+        if (qty > 0) grant[itemId] = qty;
+        if (rem > 0) nextRem[itemId] = rem;
+    }
+    state._factoryIdleGrantedAtIso = new Date(nowMs).toISOString();
+    state._factoryIdleRemainder = nextRem;
+    return sanitizeInventoryMap(grant);
 }
 
 function persistFactoryState(userId, st) {
@@ -1203,13 +1263,29 @@ const server = http.createServer((req, res) => {
         const auth = authenticate(req);
         if (!auth) return send(res, 401, 'unauthorized', CORS_API);
         const st = getOrInitFactoryState(auth.userId);
+        const idleCursorBefore = String(st._factoryIdleGrantedAtIso || '');
+        const idleRemainderBefore = JSON.stringify(st._factoryIdleRemainder || {});
         const pending = sanitizeInventoryMap(st._factoryPendingProduced);
-        const canGrant = Object.keys(pending).length > 0;
-        let granted = {};
+        const idleGrant = computeIdleProductionGrant(st, Date.now());
+        const granted = {};
+        for (const [itemId, qty] of Object.entries(pending)) {
+            granted[itemId] = (Number(granted[itemId] || 0) | 0) + (Number(qty) | 0);
+        }
+        for (const [itemId, qty] of Object.entries(idleGrant)) {
+            granted[itemId] = (Number(granted[itemId] || 0) | 0) + (Number(qty) | 0);
+        }
+        const canGrant = Object.keys(granted).length > 0;
         if (canGrant) {
-            addToUserInventory(db, auth.userId, pending);
-            granted = pending;
+            addToUserInventory(db, auth.userId, granted);
             st._factoryPendingProduced = {};
+        }
+        const idleCursorAfter = String(st._factoryIdleGrantedAtIso || '');
+        const idleRemainderAfter = JSON.stringify(st._factoryIdleRemainder || {});
+        if (
+            canGrant ||
+            idleCursorBefore !== idleCursorAfter ||
+            idleRemainderBefore !== idleRemainderAfter
+        ) {
             persistFactoryState(auth.userId, st);
         }
         sendJson(
@@ -1284,6 +1360,14 @@ const server = http.createServer((req, res) => {
                 st._factoryLastProducedPerMinute =
                     prev._factoryLastProducedPerMinute && typeof prev._factoryLastProducedPerMinute === 'object'
                         ? { ...prev._factoryLastProducedPerMinute }
+                        : {};
+                st._factoryIdleGrantedAtIso =
+                    typeof prev._factoryIdleGrantedAtIso === 'string' && prev._factoryIdleGrantedAtIso.trim()
+                        ? prev._factoryIdleGrantedAtIso.trim()
+                        : null;
+                st._factoryIdleRemainder =
+                    prev._factoryIdleRemainder && typeof prev._factoryIdleRemainder === 'object'
+                        ? { ...prev._factoryIdleRemainder }
                         : {};
                 activateFactoryRunWindow(st, Date.now());
                 factoryStateByUser.set(auth.userId, st);
