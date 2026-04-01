@@ -1354,13 +1354,9 @@ function setGlobalDiscoveriesModalOpen(open) {
 function setDbViewerModalOpen(open) {
     if (!dbViewerModalEl) return;
     dbViewerModalEl.classList.toggle('hidden', !open);
-    // Force strict modal behavior: disable interaction with all other root nodes.
+    // Defensive cleanup: never leave root nodes inert (can block dragging in lab).
     const roots = Array.from(document.body.children);
-    for (const el of roots) {
-        if (el === dbViewerModalEl) continue;
-        if (open) el.setAttribute('inert', '');
-        else el.removeAttribute('inert');
-    }
+    for (const el of roots) el.removeAttribute('inert');
 }
 
 function setDbViewerStatus(msg) {
