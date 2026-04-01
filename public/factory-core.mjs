@@ -37,6 +37,64 @@ function canCombinerAcceptFrom(combinerKey, fromKey, getCombinerDir) {
     return incomingDir === (outDir + 1) % 4 || incomingDir === (outDir + 3) % 4;
 }
 
+function inputDirFromSourceToDest(fromCol, fromRow, toCol, toRow) {
+    if (fromCol === toCol + 1 && fromRow === toRow) return 0; // right
+    if (fromCol === toCol && fromRow === toRow - 1) return 1; // up
+    if (fromCol === toCol - 1 && fromRow === toRow) return 2; // left
+    if (fromCol === toCol && fromRow === toRow + 1) return 3; // down
+    return -1;
+}
+
+function sourceColRowFromInputDir(destCol, destRow, inputDir) {
+    const d = ((Number(inputDir) | 0) + 4) % 4;
+    if (d === 0) return { col: destCol + 1, row: destRow };
+    if (d === 1) return { col: destCol, row: destRow - 1 };
+    if (d === 2) return { col: destCol - 1, row: destRow };
+    return { col: destCol, row: destRow + 1 };
+}
+
+function ensureTransporterConflictState(state, getTransporterDir) {
+    const signatureParts = [];
+    const transporterKeys = Object.entries(state.placements || {})
+        .filter(([, p]) => p === 'transporter')
+        .map(([k]) => k)
+        .sort();
+    for (const key of transporterKeys) {
+        signatureParts.push(`${key}:${getTransporterDir(key)}`);
+    }
+    const sig = signatureParts.join('|');
+    if (state._ttConflictSig === sig && state._ttConflictInputs && state._ttInputCursor) return;
+
+    const incomingByDest = {};
+    for (const srcKey of transporterKeys) {
+        const s = factoryKeyToColRow(srcKey);
+        if (!Number.isFinite(s.col) || !Number.isFinite(s.row)) continue;
+        const nb = factoryNeighborColRow(s.col, s.row, getTransporterDir(srcKey));
+        const destKey = factoryPlacementKey(nb.col, nb.row);
+        if (state.placements[destKey] !== 'transporter') continue;
+        const d = factoryKeyToColRow(destKey);
+        const inDir = inputDirFromSourceToDest(s.col, s.row, d.col, d.row);
+        if (inDir < 0) continue;
+        if (!incomingByDest[destKey]) incomingByDest[destKey] = [];
+        incomingByDest[destKey].push(inDir);
+    }
+    const conflictInputs = {};
+    for (const [destKey, dirs] of Object.entries(incomingByDest)) {
+        const uniq = [...new Set(dirs)].sort((a, b) => a - b);
+        if (uniq.length > 1) conflictInputs[destKey] = uniq;
+    }
+
+    const nextCursor = {};
+    const prevCursor = state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : {};
+    for (const destKey of Object.keys(conflictInputs)) {
+        const prev = Number(prevCursor[destKey] || 0) | 0;
+        nextCursor[destKey] = ((prev % 4) + 4) % 4;
+    }
+    state._ttConflictSig = sig;
+    state._ttConflictInputs = conflictInputs;
+    state._ttInputCursor = nextCursor;
+}
+
 /**
  * Shared factory simulation tick.
  * Mutates state.cellItems / state.combinerDiscovery.
@@ -59,6 +117,7 @@ export function simulateFactoryStep(state, deps) {
         for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
         return ((h + loopTick + pass) >>> 0) % Math.max(1, count);
     };
+    ensureTransporterConflictState(state, getTransporterDir);
 
     const work = {};
     for (const [k, v] of Object.entries(state.cellItems || {})) {
@@ -167,38 +226,45 @@ export function simulateFactoryStep(state, deps) {
 
     const claimedDest = new Set();
     const claimedFrom = new Set();
-    movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
-    const ttByDest = new Map();
-    for (const m of movesTTCandidates) {
-        const arr = ttByDest.get(m.to);
-        if (arr) arr.push(m);
-        else ttByDest.set(m.to, [m]);
-    }
-    const ttDestKeys = Array.from(ttByDest.keys()).sort();
-    // Resolve in passes so an item can enter a cell vacated earlier in the same tick.
-    for (let pass = 0; pass < movesTTCandidates.length; pass++) {
-        let progressed = false;
-        for (const destKey of ttDestKeys) {
-            if (claimedDest.has(destKey)) continue;
-            if (work[destKey]) continue;
-            const list = ttByDest.get(destKey);
-            if (!list || list.length === 0) continue;
-            const start = rotateStart(destKey, list.length, pass);
-            for (let i = 0; i < list.length; i++) {
-                const m = list[(start + i) % list.length];
-                if (claimedFrom.has(m.from)) continue;
-                // Source may have been consumed/changed earlier in the tick; if so, skip.
-                if (!work[m.from] || work[m.from] !== m.itemId) continue;
-                claimedDest.add(destKey);
-                claimedFrom.add(m.from);
-                delete work[m.from];
-                work[destKey] = m.itemId;
-                movesTT.push(m);
-                progressed = true;
-                break;
-            }
+    const acceptedFromByDest = {};
+    const conflictInputs = state._ttConflictInputs && typeof state._ttConflictInputs === 'object' ? state._ttConflictInputs : {};
+    const cursorMap = state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : {};
+    for (const destKey of Object.keys(conflictInputs)) {
+        const dirs = Array.isArray(conflictInputs[destKey]) ? conflictInputs[destKey] : [];
+        if (!dirs.length) continue;
+        const d = factoryKeyToColRow(destKey);
+        if (!Number.isFinite(d.col) || !Number.isFinite(d.row)) continue;
+        const startDir = ((Number(cursorMap[destKey] || 0) | 0) + 4) % 4;
+        for (let i = 0; i < 4; i++) {
+            const dir = (startDir + i) % 4;
+            if (!dirs.includes(dir)) continue;
+            const src = sourceColRowFromInputDir(d.col, d.row, dir);
+            const srcKey = factoryPlacementKey(src.col, src.row);
+            if (state.placements[srcKey] !== 'transporter') continue;
+            const nb = factoryNeighborColRow(src.col, src.row, getTransporterDir(srcKey));
+            if (factoryPlacementKey(nb.col, nb.row) !== destKey) continue;
+            const itemId = work[srcKey];
+            if (!itemId) continue;
+            if (spawnedThisTick.has(srcKey)) continue;
+            acceptedFromByDest[destKey] = srcKey;
+            break;
         }
-        if (!progressed) break;
+        cursorMap[destKey] = (startDir + 1) % 4;
+    }
+    state._ttInputCursor = cursorMap;
+
+    movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
+    for (const m of movesTTCandidates) {
+        if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
+        const acceptedFrom = acceptedFromByDest[m.to];
+        if (acceptedFrom && acceptedFrom !== m.from) continue;
+        if (work[m.to]) continue;
+        if (!work[m.from] || work[m.from] !== m.itemId) continue;
+        claimedDest.add(m.to);
+        claimedFrom.add(m.from);
+        delete work[m.from];
+        work[m.to] = m.itemId;
+        movesTT.push(m);
     }
 
     movesToEmptyCombinerCandidates.sort((a, b) => a.from.localeCompare(b.from));
