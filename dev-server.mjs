@@ -223,6 +223,33 @@ function factoryInBounds(state, col, row) {
     return col >= 0 && row >= 0 && col < n && row < n;
 }
 
+function factoryMaterialFromCornerSources(state, col, row) {
+    const n = factoryGridCols(state);
+    const corners = [
+        [0, 0, 'wood'],
+        [n - 1, 0, 'stone'],
+        [0, n - 1, 'water'],
+        [n - 1, n - 1, 'dirt']
+    ];
+    const found = [];
+    for (const [cc, rr, id] of corners) {
+        const d2 = Math.abs(col - cc) + Math.abs(row - rr);
+        if (d2 === 0 || d2 === 2) found.push(id);
+    }
+    if (found.length === 0) return null;
+    const uniq = [...new Set(found)];
+    if (uniq.length === 1) return uniq[0];
+    const order = { wood: 0, stone: 1, water: 2, dirt: 3 };
+    return uniq.sort((a, b) => order[a] - order[b])[0];
+}
+
+function factoryCellResourceId(state, col, row) {
+    const key = factoryPlacementKey(col, row);
+    const stored = state.cellResources[key];
+    if (stored && typeof stored === 'string' && stored.trim()) return stored.trim();
+    return factoryMaterialFromCornerSources(state, col, row);
+}
+
 function factoryTransporterDir(state, key) {
     const d = state.transporterDirs[key];
     return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
@@ -384,7 +411,7 @@ function factoryStep(state) {
     for (const [key, p] of Object.entries(state.placements || {})) {
         if (p !== 'extractor') continue;
         const { col, row } = factoryKeyToColRow(key);
-        const resId = state.cellResources[key];
+        const resId = factoryCellResourceId(state, col, row);
         if (!resId) continue;
         for (let dir = 0; dir < 4; dir++) {
             const nb = factoryNeighborColRow(col, row, dir);
