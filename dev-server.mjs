@@ -70,6 +70,7 @@ const MIN_FACTORY_LOOP_MS = 33;
 const MAX_FACTORY_SIZE_LEVEL = 10;
 const PLAYER_TIMEOUT_MS = 60 * 1000;
 const FACTORY_RUN_WINDOW_MS = 10 * 1000;
+const FACTORY_STATS_BUCKET_MS = 10 * 1000;
 
 const db = openDb();
 const publicRoot = path.join(__dirname, 'public');
@@ -350,7 +351,7 @@ function addProducedToMinuteStats(state, nowMs, delta) {
     if (!delta || typeof delta !== 'object') return;
     const startedAt = Number(state._factoryRunStartedAt || 0);
     if (!startedAt) return;
-    const minuteIdx = Math.max(0, Math.floor((nowMs - startedAt) / 60000));
+    const minuteIdx = Math.max(0, Math.floor((nowMs - startedAt) / FACTORY_STATS_BUCKET_MS));
     const minuteKey = String(minuteIdx);
     if (!state._factoryCurrentProducedPerMinute || typeof state._factoryCurrentProducedPerMinute !== 'object') {
         state._factoryCurrentProducedPerMinute = {};

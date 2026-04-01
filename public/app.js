@@ -149,6 +149,7 @@ function emojiForItemId(id) {
 const factoryIconImageCache = new Map();
 const clientProcessedIconCache = new Map();
 const CLIENT_ICON_BG_TOLERANCE = Math.round(255 * 0.02);
+const FACTORY_STATS_BUCKET_SECONDS = 10;
 
 /** @param {string} itemId */
 function factoryGetLoadedIconImage(itemId) {
@@ -1980,7 +1981,10 @@ function renderFactoryRuntimeStatsModal() {
                 return `${label} x${it.qty}`;
             })
             .join(', ');
-        line.textContent = `Minute ${row.minute}: ${itemsText}`;
+        const bucketIdx = Math.max(1, Number(row.minute) | 0) - 1;
+        const startSec = bucketIdx * FACTORY_STATS_BUCKET_SECONDS;
+        const endSec = startSec + FACTORY_STATS_BUCKET_SECONDS;
+        line.textContent = `${startSec}-${endSec}s: ${itemsText}`;
         factoryRuntimeStatsListEl.appendChild(line);
     }
 }
