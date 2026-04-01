@@ -2425,6 +2425,10 @@ function stopFactoryLoop() {
 }
 
 function onFactoryLoopTick() {
+    const rt = state.factoryRuntime || {};
+    const runUntilAtMs = Number(rt.runUntilAtMs || 0);
+    const isServerRunActive = rt.running === true && runUntilAtMs > Date.now();
+    if (!isServerRunActive) return;
     state.factory.loopTick = (state.factory.loopTick | 0) + 1;
     factoryRunSimTick();
     state.factory.loopPulseUntil = performance.now() + 120;
