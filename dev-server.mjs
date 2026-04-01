@@ -68,7 +68,7 @@ const FACTORY_LOOP_MS_DEFAULT = 500;
 const MIN_FACTORY_LOOP_MS = 33;
 const MAX_FACTORY_SIZE_LEVEL = 10;
 const PLAYER_TIMEOUT_MS = 60 * 1000;
-const FACTORY_RUN_WINDOW_MS = 2 * 60 * 1000;
+const FACTORY_RUN_WINDOW_MS = 10 * 1000;
 
 const db = openDb();
 const publicRoot = path.join(__dirname, 'public');
