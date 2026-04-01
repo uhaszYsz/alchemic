@@ -55,6 +55,7 @@ export function simulateFactoryStep(state, deps) {
     for (const k of Object.keys(state.combinerDiscovery || {})) delete work[k];
 
     const spawns = [];
+    const spawnedThisTick = new Set();
     const loopTick = Number(state.loopTick || 0) | 0;
     const extractorTick = (loopTick & 1) === 0;
     if (extractorTick) {
@@ -70,6 +71,7 @@ export function simulateFactoryStep(state, deps) {
                 if (state.placements[tk] !== 'transporter') continue;
                 if (work[tk]) continue;
                 work[tk] = resId;
+                spawnedThisTick.add(tk);
                 spawns.push({ from: key, to: tk, itemId: resId });
             }
         }
@@ -82,6 +84,8 @@ export function simulateFactoryStep(state, deps) {
 
     for (const [key, p] of Object.entries(state.placements || {})) {
         if (p !== 'transporter') continue;
+        // Keep extractor output on its belt cell for one full tick to maintain visible spacing.
+        if (spawnedThisTick.has(key)) continue;
         const itemId = work[key];
         if (!itemId) continue;
         const cell = factoryKeyToColRow(key);
