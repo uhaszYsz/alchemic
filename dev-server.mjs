@@ -454,6 +454,22 @@ function tickAllFactories() {
         while (st._serverAccumulatorMs >= stepMs && guard < 20) {
             st._serverAccumulatorMs -= stepMs;
             const delta = factoryStep(st) || {};
+            const transporters = [];
+            for (const [key, placement] of Object.entries(st.placements || {})) {
+                if (placement !== 'transporter') continue;
+                transporters.push({ key, dir: factoryTransporterDir(st, key) });
+            }
+            transporters.sort((a, b) => a.key.localeCompare(b.key));
+            const items = {};
+            for (const [k, v] of Object.entries(st.cellItems || {})) {
+                if (!k || !v) continue;
+                items[k] = v;
+            }
+            console.log(
+                `[factory-step] user=${Number(userId) | 0} loopTick=${Number(st.loopTick || 0)} transporters=${JSON.stringify(
+                    transporters
+                )} items=${JSON.stringify(items)}`
+            );
             for (const [itemId, qty] of Object.entries(delta)) {
                 totalDelta[itemId] = (totalDelta[itemId] || 0) + (Number(qty) | 0);
             }
