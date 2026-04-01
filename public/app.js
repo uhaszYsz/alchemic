@@ -1969,6 +1969,7 @@ const discoveryUploadIconFileInput = /** @type {HTMLInputElement | null} */ (
 const discoveryAiImageStatus = document.getElementById('discovery-ai-image-status');
 const discoveryAiImageImg = document.getElementById('discovery-ai-image-img');
 const discoveryAiImageGridEl = document.getElementById('discovery-ai-image-grid');
+const discoveryAiImageQueryInput = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-ai-image-query'));
 const discoveryAiImagePrevBtn = document.getElementById('discovery-ai-image-prev');
 const discoveryAiImageNextBtn = document.getElementById('discovery-ai-image-next');
 const discoveryAiImagePageEl = document.getElementById('discovery-ai-image-page');
@@ -2171,6 +2172,7 @@ function resetDiscoveryAiImagePreview() {
     if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = false;
     if (discoveryUploadIconBtn) discoveryUploadIconBtn.disabled = false;
     if (discoveryIconUrlInput) discoveryIconUrlInput.value = '';
+    if (discoveryAiImageQueryInput) discoveryAiImageQueryInput.value = '';
     if (discoveryUploadIconFileInput) discoveryUploadIconFileInput.value = '';
     if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = '';
     syncDiscoveryImagePagerUi();
@@ -2182,9 +2184,21 @@ function resetDiscoveryAiImagePreview() {
 }
 
 /** @returns {string} */
-function buildDiscoveryImageQuery() {
+function defaultDiscoveryImageQueryFromName() {
     const itemName = getDiscoveryChosenName() || (state.discoveryIconItemName || '').trim() || 'item';
-    return `${itemName} svg color icon`;
+    return `${itemName} svg icon`;
+}
+
+/** @returns {string} */
+function buildDiscoveryImageQuery() {
+    const typed = discoveryAiImageQueryInput ? discoveryAiImageQueryInput.value.trim() : '';
+    if (typed) return typed;
+    return defaultDiscoveryImageQueryFromName();
+}
+
+function syncDiscoveryImageQueryInput() {
+    if (!discoveryAiImageQueryInput) return;
+    discoveryAiImageQueryInput.value = defaultDiscoveryImageQueryFromName();
 }
 
 function setDiscoveryStep(step) {
@@ -2539,6 +2553,7 @@ function setDiscoverySelectedName(name, emoji, opts) {
     if (discoveryEmojiInputEl && typeof emoji === 'string') {
         discoveryEmojiInputEl.value = normalizeSuggestionEmoji(emoji) || '';
     }
+    syncDiscoveryImageQueryInput();
     syncDiscoverySelectedNameUi();
     renderAiSuggestions();
     updateDiscoverySaveButton();
@@ -4029,6 +4044,7 @@ function openDiscoveryModal(pending, preloadedParsed) {
     if (discoveryEmojiInputEl) discoveryEmojiInputEl.value = '';
     renderDiscoveryNameColorChoices();
     syncDiscoverySelectedNameUi();
+    syncDiscoveryImageQueryInput();
     if (saveDiscoveryBtn) {
         saveDiscoveryBtn.disabled = true;
         saveDiscoveryBtn.textContent = 'Confirm';
@@ -4052,6 +4068,14 @@ function openDiscoveryModal(pending, preloadedParsed) {
 
 if (discoveryAiImageBtn) {
     discoveryAiImageBtn.addEventListener('click', () => {
+        discoveryIconSearchPage = 0;
+        void generateDiscoveryIconPreview(0);
+    });
+}
+if (discoveryAiImageQueryInput) {
+    discoveryAiImageQueryInput.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
         discoveryIconSearchPage = 0;
         void generateDiscoveryIconPreview(0);
     });
