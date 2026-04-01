@@ -1916,6 +1916,7 @@ function applyFactoryRuntime(runtime) {
         runUntilAtMs: Number.isFinite(runUntilAtMs) ? runUntilAtMs : 0,
         statsPerMinute
     };
+    state.auth.factoryRuntimeSyncedAt = Date.now();
     renderFactoryRuntimeStatus();
 }
 
@@ -1999,7 +2000,7 @@ function startFactoryRuntimeSyncLoop() {
         if (state.activeWorkspace === 'factory') {
             void pullFactoryRuntimeStatus();
         }
-    }, 10000);
+    }, 2000);
     if (state.activeWorkspace === 'factory') {
         void pullFactoryRuntimeStatus();
     }
@@ -2425,6 +2426,12 @@ function stopFactoryLoop() {
 }
 
 function onFactoryLoopTick() {
+    const syncedAt = Number(state.auth.factoryRuntimeSyncedAt || 0);
+    const runtimeFresh = syncedAt > 0 && Date.now() - syncedAt <= 5000;
+    if (!runtimeFresh) {
+        void pullFactoryRuntimeStatus();
+        return;
+    }
     const rt = state.factoryRuntime || {};
     const runUntilAtMs = Number(rt.runUntilAtMs || 0);
     const isServerRunActive = rt.running === true && runUntilAtMs > Date.now();
@@ -2438,7 +2445,6 @@ function startFactoryLoop() {
     stopFactoryLoop();
     if (state.activeWorkspace !== 'factory' || !factoryCanvasEl) return;
     const ms = factoryLoopIntervalMs();
-    onFactoryLoopTick();
     factoryLoopTimerId = setInterval(onFactoryLoopTick, ms);
 }
 
@@ -4342,6 +4348,8 @@ function setWorkspace(which) {
                 })
                 .finally(() => {
                     state.auth.enteringFactory = false;
+                    // Opening factory should start a fresh server run even if user did not edit layout yet.
+                    notifyFactoryStateMutated();
                     renderFactoryGrid();
                     startFactoryLoop();
                     void pullFactoryRuntimeStatus();
