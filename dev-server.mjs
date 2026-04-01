@@ -513,14 +513,8 @@ function tickAllFactories() {
             guard++;
         }
         if (Object.keys(totalDelta).length) {
-            if (!st._factoryPendingProduced || typeof st._factoryPendingProduced !== 'object') {
-                st._factoryPendingProduced = {};
-            }
-            for (const [itemId, qty] of Object.entries(totalDelta)) {
-                const n = Number(qty) | 0;
-                if (!itemId || n <= 0) continue;
-                st._factoryPendingProduced[itemId] = (Number(st._factoryPendingProduced[itemId] || 0) | 0) + n;
-            }
+            // Persist produced items immediately to DB inventory (server-authoritative).
+            addToUserInventory(db, Number(userId) | 0, totalDelta);
             addProducedToMinuteStats(st, now, totalDelta);
         }
     }
