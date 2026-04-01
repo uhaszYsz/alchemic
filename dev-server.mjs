@@ -227,16 +227,20 @@ function factoryInBounds(state, col, row) {
 }
 
 function factoryMaterialFromCornerSources(state, col, row) {
-    const n = factoryGridCols(state);
+    const center2Col = factoryGridCols(state) - 1;
+    const center2Row = factoryGridCols(state) - 1;
+    const span2 = factoryGridCols(state) - 1;
+    const col2 = col * 2;
+    const row2 = row * 2;
     const corners = [
-        [0, 0, 'wood'],
-        [n - 1, 0, 'stone'],
-        [0, n - 1, 'water'],
-        [n - 1, n - 1, 'dirt']
+        [center2Col - span2, center2Row - span2, 'wood'],
+        [center2Col + span2, center2Row - span2, 'stone'],
+        [center2Col - span2, center2Row + span2, 'water'],
+        [center2Col + span2, center2Row + span2, 'dirt']
     ];
     const found = [];
     for (const [cc, rr, id] of corners) {
-        const d2 = Math.abs(col - cc) + Math.abs(row - rr);
+        const d2 = Math.abs(col2 - cc) + Math.abs(row2 - rr);
         if (d2 === 0 || d2 === 2) found.push(id);
     }
     if (found.length === 0) return null;
