@@ -249,9 +249,7 @@ export function simulateFactoryStep(state, deps) {
             acceptedFromByDest[destKey] = srcKey;
             break;
         }
-        cursorMap[destKey] = (startDir + 1) % 4;
     }
-    state._ttInputCursor = cursorMap;
 
     movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
     for (const m of movesTTCandidates) {
@@ -265,7 +263,13 @@ export function simulateFactoryStep(state, deps) {
         delete work[m.from];
         work[m.to] = m.itemId;
         movesTT.push(m);
+        // Advance accepted input direction only after successful receive into this transporter.
+        if (acceptedFromByDest[m.to] && acceptedFromByDest[m.to] === m.from) {
+            const cur = ((Number(cursorMap[m.to] || 0) | 0) + 4) % 4;
+            cursorMap[m.to] = (cur + 1) % 4;
+        }
     }
+    state._ttInputCursor = cursorMap;
 
     movesToEmptyCombinerCandidates.sort((a, b) => a.from.localeCompare(b.from));
     const tcByDest = new Map();
