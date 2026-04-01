@@ -480,6 +480,56 @@ async function proxyOpenAI(req, res, target) {
     res.end(text);
 }
 
+/**
+ * Server-side DuckDuckGo image search (no browser CORS issues).
+ * @param {string} query
+ * @param {number} limit
+ * @returns {Promise<string[]>}
+ */
+async function fetchDuckDuckGoImageCandidatesServer(query, limit) {
+    const q = String(query || '').trim();
+    const max = Math.max(1, Math.min(12, Number(limit || 6) | 0));
+    if (!q) return [];
+    const pageUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=images&ia=images`;
+    const pageRes = await fetch(pageUrl, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0',
+            Accept: 'text/html'
+        }
+    });
+    if (!pageRes.ok) throw new Error(`DuckDuckGo page failed: ${pageRes.status}`);
+    const pageHtml = await pageRes.text();
+    const vqdMatch =
+        pageHtml.match(/vqd=['"]([^'"]+)['"]/i) ||
+        pageHtml.match(/vqd=([0-9-]+)\&/i) ||
+        pageHtml.match(/"vqd"\s*:\s*"([^"]+)"/i);
+    const vqd = vqdMatch && vqdMatch[1] ? String(vqdMatch[1]).trim() : '';
+    if (!vqd) throw new Error('DuckDuckGo token missing in response.');
+    const apiUrl =
+        `https://duckduckgo.com/i.js?o=json&l=wt-wt&p=1` +
+        `&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}`;
+    const imgRes = await fetch(apiUrl, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0',
+            Accept: 'application/json',
+            Referer: 'https://duckduckgo.com/'
+        }
+    });
+    if (!imgRes.ok) throw new Error(`DuckDuckGo images failed: ${imgRes.status}`);
+    const payload = await imgRes.json();
+    const rows = Array.isArray(payload && payload.results) ? payload.results : [];
+    const out = [];
+    const seen = new Set();
+    for (const row of rows) {
+        const u = row && typeof row.image === 'string' ? row.image.trim() : '';
+        if (!u || seen.has(u)) continue;
+        seen.add(u);
+        out.push(u);
+        if (out.length >= max) break;
+    }
+    return out;
+}
+
 /** @param {string} raw */
 function extractJsonObjectFromAiReply(raw) {
     let s = String(raw || '').trim();
@@ -913,6 +963,22 @@ const server = http.createServer((req, res) => {
         proxyOpenAI(req, res, 'https://api.openai.com/v1/images/generations').catch((err) => {
             send(res, 500, String(err.message || err), CORS_API);
         });
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/images/search') {
+        readRequestBody(req)
+            .then(async (raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const query = typeof body.query === 'string' ? body.query.trim() : '';
+                const limitRaw = Number(body.limit);
+                const limit = Number.isFinite(limitRaw) ? limitRaw : 6;
+                if (!query) return send(res, 400, 'query required', CORS_API);
+                const images = await fetchDuckDuckGoImageCandidatesServer(query, limit);
+                sendJson(res, 200, { images }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;
     }
 

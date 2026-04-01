@@ -131,7 +131,7 @@ function useLocalProxy() {
     return true;
 }
 
-/** Backend that serves `/api/items`, `/api/chat`, and `/api/images` (defaults to same origin as the page). */
+/** Backend that serves `/api/items`, `/api/chat`, and image APIs (defaults to same origin as the page). */
 function apiOrigin() {
     const raw = typeof window !== 'undefined' && window.ALCHEMIC_API_BASE;
     if (typeof raw === 'string' && raw.trim()) {
@@ -167,11 +167,12 @@ async function fetchChatCompletions(body) {
 }
 
 /**
- * OpenAI Images API (DALL·E). Use small `size` with `dall-e-2` for icons.
- * @param {{ model?: string, prompt: string, n?: number, size?: string, response_format?: string }} body
+ * Server-side image search; avoids browser CORS.
+ * @param {{ query: string, limit?: number }} body
+ * @returns {Promise<{ images: string[] }>}
  */
-async function fetchImageGenerations(body) {
-    const res = await apiFetch('/api/images', {
+async function fetchImageSearchResults(body) {
+    const res = await apiFetch('/api/images/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -1967,46 +1968,6 @@ function buildDiscoveryImageQuery() {
     return `${itemName} flat icon`;
 }
 
-/**
- * Client-side DuckDuckGo image search.
- * Returns direct image URLs from image result cards.
- * @param {string} query
- * @param {number} limit
- * @returns {Promise<string[]>}
- */
-async function fetchDuckDuckGoImageCandidates(query, limit) {
-    const q = String(query || '').trim();
-    const max = Math.max(1, Math.min(12, Number(limit || 6) | 0));
-    if (!q) return [];
-    const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=images&ia=images`;
-    const pageRes = await fetch(searchUrl);
-    if (!pageRes.ok) throw new Error(`DuckDuckGo page failed: ${pageRes.status}`);
-    const pageHtml = await pageRes.text();
-    const vqdMatch =
-        pageHtml.match(/vqd=['"]([^'"]+)['"]/i) || pageHtml.match(/vqd=([0-9-]+)\&/i);
-    const vqd = vqdMatch && vqdMatch[1] ? String(vqdMatch[1]).trim() : '';
-    if (!vqd) throw new Error('DuckDuckGo token missing in response.');
-    const apiUrl =
-        `https://duckduckgo.com/i.js?o=json&l=wt-wt&p=1` +
-        `&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}`;
-    const imgRes = await fetch(apiUrl, {
-        headers: { Accept: 'application/json' }
-    });
-    if (!imgRes.ok) throw new Error(`DuckDuckGo images failed: ${imgRes.status}`);
-    const payload = await imgRes.json();
-    const rows = Array.isArray(payload && payload.results) ? payload.results : [];
-    const out = [];
-    const seen = new Set();
-    for (const row of rows) {
-        const u = row && typeof row.image === 'string' ? row.image.trim() : '';
-        if (!u || seen.has(u)) continue;
-        seen.add(u);
-        out.push(u);
-        if (out.length >= max) break;
-    }
-    return out;
-}
-
 function setDiscoveryStep(step) {
     const isName = step === 'name';
     if (discoveryStepNameEl) discoveryStepNameEl.classList.toggle('hidden', !isName);
@@ -2027,7 +1988,8 @@ async function generateDiscoveryIconPreview() {
     clearDiscoveryAiImageGrid();
     try {
         const query = buildDiscoveryImageQuery();
-        const urls = await fetchDuckDuckGoImageCandidates(query, DISCOVERY_ICON_VARIANT_COUNT);
+        const out = await fetchImageSearchResults({ query, limit: DISCOVERY_ICON_VARIANT_COUNT });
+        const urls = Array.isArray(out && out.images) ? out.images : [];
         if (!urls.length) throw new Error('No image URLs in response');
         renderDiscoveryAiCandidates(urls);
         if (discoveryAiImageStatus) {
@@ -2038,8 +2000,7 @@ async function generateDiscoveryIconPreview() {
         state.discoveryPreviewUrl = '';
         clearDiscoveryAiImageGrid();
         if (discoveryAiImageStatus) {
-            discoveryAiImageStatus.textContent =
-                `Icon search failed. ${msg.slice(0, 220)} (often caused by browser CORS restrictions).`;
+            discoveryAiImageStatus.textContent = `Icon search failed. ${msg.slice(0, 220)}`;
         }
     } finally {
         discoveryAiImageBtn.disabled = false;
