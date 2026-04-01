@@ -146,7 +146,7 @@ function emojiForItemId(id) {
 
 const factoryIconImageCache = new Map();
 const clientProcessedIconCache = new Map();
-const CLIENT_ICON_BG_TOLERANCE = 16;
+const CLIENT_ICON_BG_TOLERANCE = Math.round(255 * 0.02);
 
 /** @param {string} itemId */
 function factoryGetLoadedIconImage(itemId) {
