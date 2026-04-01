@@ -10,6 +10,8 @@ import {
     isRejectedCraft,
     upsertItem,
     findItemByName,
+    listDependentItems,
+    deleteItemById,
     setItemIconPath,
     voteOnItem,
     createDiscoveryProposal,
@@ -628,6 +630,21 @@ async function fetchDiscoverySuggestions(input) {
     return { suggestions, explanation, makesenceYes: null };
 }
 
+/**
+ * Remove AI suggestions that already exist in DB by name.
+ * @param {{ name: string, emoji: string }[]} suggestions
+ * @returns {{ name: string, emoji: string }[]}
+ */
+function filterExistingSuggestionNames(suggestions) {
+    if (!Array.isArray(suggestions) || suggestions.length < 1) return [];
+    return suggestions.filter((s) => {
+        const name = s && typeof s.name === 'string' ? s.name.trim() : '';
+        if (!name) return false;
+        const existing = findItemByName(db, name);
+        return !existing;
+    });
+}
+
 function staticFileFromRoot(urlPath, root) {
     const rel = urlPath.replace(/^\//, '').replace(/\.\./g, '');
     const filePath = path.resolve(root, rel);
@@ -885,6 +902,7 @@ const server = http.createServer((req, res) => {
                     itemA: { name: aName },
                     itemB: { name: bName }
                 });
+                out.suggestions = filterExistingSuggestionNames(out.suggestions);
                 sendJson(res, 200, out, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
@@ -940,6 +958,54 @@ const server = http.createServer((req, res) => {
                 recipeIndex = buildRecipeIndex(getItemsMap(db));
                 res.writeHead(204, CORS_API);
                 res.end();
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/items/delete-check') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const id = typeof body.id === 'string' ? body.id.trim() : '';
+                if (!id) return send(res, 400, 'id required', CORS_API);
+                const dependents = listDependentItems(db, id);
+                sendJson(res, 200, { ok: true, id, dependents }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/items/delete') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const id = typeof body.id === 'string' ? body.id.trim() : '';
+                if (!id) return send(res, 400, 'id required', CORS_API);
+                const dependents = listDependentItems(db, id);
+                if (dependents.length > 0) {
+                    return sendJson(
+                        res,
+                        409,
+                        {
+                            ok: false,
+                            id,
+                            dependents,
+                            message: 'Item is required by other discoveries. Remove dependents first.'
+                        },
+                        CORS_API
+                    );
+                }
+                const deleted = deleteItemById(db, id);
+                if (!deleted) return send(res, 404, 'item not found', CORS_API);
+                recipeIndex = buildRecipeIndex(getItemsMap(db));
+                sendJson(res, 200, { ok: true, id }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;

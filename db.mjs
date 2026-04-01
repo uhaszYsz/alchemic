@@ -237,6 +237,52 @@ export function findItemByName(db, name) {
 }
 
 /**
+ * List items that require a given item as an ingredient.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @returns {{ id: string, name: string, emoji: string }[]}
+ */
+export function listDependentItems(db, itemId) {
+    const id = String(itemId || '').trim();
+    if (!id) return [];
+    const rows = db
+        .prepare(
+            `SELECT id, name, emoji
+             FROM items
+             WHERE ingredient_a = @id OR ingredient_b = @id
+             ORDER BY name COLLATE NOCASE, id`
+        )
+        .all({ id });
+    return rows.map((r) => ({
+        id: String(r.id),
+        name: String(r.name || r.id),
+        emoji: String(r.emoji || '✨')
+    }));
+}
+
+/**
+ * Delete an item and related proposal/rejected-craft rows.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @returns {boolean}
+ */
+export function deleteItemById(db, itemId) {
+    const id = String(itemId || '').trim();
+    if (!id) return false;
+    const tx = db.transaction((targetId) => {
+        db.prepare(
+            `DELETE FROM discovery_proposal_votes
+             WHERE proposal_id IN (SELECT id FROM discovery_proposals WHERE item_id = @id)`
+        ).run({ id: targetId });
+        db.prepare('DELETE FROM discovery_proposals WHERE item_id = @id').run({ id: targetId });
+        db.prepare('DELETE FROM rejectedCrafts WHERE item_a_id = @id OR item_b_id = @id').run({ id: targetId });
+        const out = db.prepare('DELETE FROM items WHERE id = @id').run({ id: targetId });
+        return out.changes > 0;
+    });
+    return tx(id);
+}
+
+/**
  * @param {import('better-sqlite3').Database} db
  * @param {string} id
  * @param {string} iconPathRelative project-relative path e.g. images/foo.png

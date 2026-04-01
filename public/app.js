@@ -918,6 +918,8 @@ function buildGlobalDiscoveriesRows(items) {
             const bDef = items[def.b];
             row.ingredientAText = aDef && typeof aDef.name === 'string' ? aDef.name : def.a;
             row.ingredientBText = bDef && typeof bDef.name === 'string' ? bDef.name : def.b;
+            row.ingredientAEmoji = aDef && typeof aDef.emoji === 'string' ? aDef.emoji : '·';
+            row.ingredientBEmoji = bDef && typeof bDef.emoji === 'string' ? bDef.emoji : '·';
         }
         if (typeof def.discoveredAt === 'string' && def.discoveredAt.trim()) {
             row.discoveredAt = def.discoveredAt.trim();
@@ -962,6 +964,38 @@ async function postDiscoveryVote(id, vote) {
         upvotes: Math.max(0, Number(out && out.upvotes) | 0),
         downvotes: Math.max(0, Number(out && out.downvotes) | 0)
     };
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<{ dependents: { id: string, name: string, emoji: string }[] }>}
+ */
+async function postDiscoveryDeleteCheck(id) {
+    const r = await apiFetch('/api/items/delete-check', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ id })
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return {
+        dependents: Array.isArray(out && out.dependents) ? out.dependents : []
+    };
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<void>}
+ */
+async function postDiscoveryDelete(id) {
+    const r = await apiFetch('/api/items/delete', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ id })
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
 }
 
 /**
@@ -1079,7 +1113,7 @@ function renderGlobalDiscoveriesPage() {
             const downvotes = Math.max(0, Number(row.downvotes || 0) | 0);
             const comboText =
                 row.ingredientAText && row.ingredientBText
-                    ? `${row.ingredientAText} + ${row.ingredientBText}`
+                    ? `${row.ingredientAEmoji || '·'} ${row.ingredientAText} + ${row.ingredientBEmoji || '·'} ${row.ingredientBText}`
                     : 'Starter item';
 
             const wrap = document.createElement('div');
@@ -1115,11 +1149,18 @@ function renderGlobalDiscoveriesPage() {
 
             const right = document.createElement('div');
             right.className = 'ml-2 shrink-0 flex items-center gap-1.5';
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className =
+                'min-h-[32px] px-2.5 rounded-md border border-rose-800 bg-rose-900/40 text-rose-200 text-xs font-semibold hover:bg-rose-900/60 transition';
+            deleteBtn.setAttribute('data-discovery-delete-btn', '1');
+            deleteBtn.setAttribute('data-id', row.id);
+            deleteBtn.textContent = 'Delete';
+            right.appendChild(deleteBtn);
             if (voteEligible) {
                 const upBtn = document.createElement('button');
                 upBtn.type = 'button';
-                upBtn.className =
-                    'min-h-[32px] px-2.5 rounded-md border border-emerald-500/80 bg-emerald-600/25 text-emerald-100 text-xs font-semibold hover:bg-emerald-500/35 transition';
+                upBtn.className = 'vote-pill vote-pill--up';
                 upBtn.setAttribute('data-discovery-vote-btn', '1');
                 upBtn.setAttribute('data-vote', 'up');
                 upBtn.setAttribute('data-id', row.id);
@@ -1128,8 +1169,7 @@ function renderGlobalDiscoveriesPage() {
 
                 const downBtn = document.createElement('button');
                 downBtn.type = 'button';
-                downBtn.className =
-                    'min-h-[32px] px-2.5 rounded-md border border-rose-500/80 bg-rose-600/25 text-rose-100 text-xs font-semibold hover:bg-rose-500/35 transition';
+                downBtn.className = 'vote-pill vote-pill--down';
                 downBtn.setAttribute('data-discovery-vote-btn', '1');
                 downBtn.setAttribute('data-vote', 'down');
                 downBtn.setAttribute('data-id', row.id);
@@ -1176,11 +1216,7 @@ function renderGlobalDiscoveriesPage() {
                     footer.className = 'mt-2 flex items-center gap-1.5';
                     const up = document.createElement('button');
                     up.type = 'button';
-                    up.className =
-                        'min-h-[28px] px-2 rounded-md border text-xs font-semibold ' +
-                        (p.myVote === 1
-                            ? 'border-emerald-300 bg-emerald-600/70 text-emerald-50'
-                            : 'border-emerald-500/80 bg-emerald-600/25 text-emerald-100');
+                    up.className = `vote-pill ${p.myVote === 1 ? 'vote-pill--selected-up' : 'vote-pill--up'}`;
                     up.setAttribute('data-discovery-proposal-vote-btn', '1');
                     up.setAttribute('data-proposal-vote', 'up');
                     up.setAttribute('data-proposal-id', String(p.id));
@@ -1189,11 +1225,7 @@ function renderGlobalDiscoveriesPage() {
                     footer.appendChild(up);
                     const down = document.createElement('button');
                     down.type = 'button';
-                    down.className =
-                        'min-h-[28px] px-2 rounded-md border text-xs font-semibold ' +
-                        (p.myVote === -1
-                            ? 'border-rose-300 bg-rose-600/70 text-rose-50'
-                            : 'border-rose-500/80 bg-rose-600/25 text-rose-100');
+                    down.className = `vote-pill ${p.myVote === -1 ? 'vote-pill--selected-down' : 'vote-pill--down'}`;
                     down.setAttribute('data-discovery-proposal-vote-btn', '1');
                     down.setAttribute('data-proposal-vote', 'down');
                     down.setAttribute('data-proposal-id', String(p.id));
@@ -3906,6 +3938,46 @@ if (globalDiscoveriesListEl) {
     globalDiscoveriesListEl.addEventListener('click', async (ev) => {
         const t = ev.target;
         if (!t || !(t instanceof Element)) return;
+        const deleteBtn = t.closest('[data-discovery-delete-btn="1"]');
+        if (deleteBtn) {
+            const id = String(deleteBtn.getAttribute('data-id') || '').trim();
+            if (!id) return;
+            deleteBtn.setAttribute('disabled', 'disabled');
+            try {
+                const check = await postDiscoveryDeleteCheck(id);
+                const deps = Array.isArray(check.dependents) ? check.dependents : [];
+                if (deps.length > 0) {
+                    const preview = deps
+                        .slice(0, 12)
+                        .map((d) => `${d.emoji || '·'} ${d.name || d.id} (${d.id})`)
+                        .join('\n');
+                    const suffix = deps.length > 12 ? `\n...and ${deps.length - 12} more` : '';
+                    alert(
+                        `Cannot delete "${id}" yet.\nIt is needed to craft:\n${preview}${suffix}`
+                    );
+                    deleteBtn.removeAttribute('disabled');
+                    return;
+                }
+                const ok = confirm(`Delete discovery "${id}" from database?`);
+                if (!ok) {
+                    deleteBtn.removeAttribute('disabled');
+                    return;
+                }
+                await postDiscoveryDelete(id);
+                await refreshGlobalDiscoveriesFromApi();
+                await reloadCatalogFromApi();
+                if (state.pendingCombination && state.pendingCombination.resultId === id) {
+                    state.pendingCombination.resultId = '';
+                }
+                state.activeElements = state.activeElements.filter((el) => String(el.id || '') !== id);
+                renderCanvas();
+            } catch (e) {
+                const msg = e && typeof e.message === 'string' ? e.message : String(e);
+                alert(msg.slice(0, 240));
+                deleteBtn.removeAttribute('disabled');
+            }
+            return;
+        }
         const voteBtn = t.closest('[data-discovery-vote-btn="1"]');
         if (voteBtn) {
             const id = String(voteBtn.getAttribute('data-id') || '').trim();
