@@ -1806,6 +1806,42 @@ function factoryInBounds(col, row) {
 }
 
 /**
+ * Returns direction index (0..3) from one adjacent cell to another, else -1.
+ * @param {number} fromCol
+ * @param {number} fromRow
+ * @param {number} toCol
+ * @param {number} toRow
+ */
+function factoryDirectionFromTo(fromCol, fromRow, toCol, toRow) {
+    if (toCol === fromCol && toRow === fromRow - 1) return 0;
+    if (toCol === fromCol + 1 && toRow === fromRow) return 1;
+    if (toCol === fromCol && toRow === fromRow + 1) return 2;
+    if (toCol === fromCol - 1 && toRow === fromRow) return 3;
+    return -1;
+}
+
+/**
+ * Combiners only accept feed on their side ports (left/right relative to output).
+ * @param {string} combinerKey
+ * @param {string} fromKey
+ */
+function factoryCombinerCanAcceptFrom(combinerKey, fromKey) {
+    const cp = combinerKey.split(',');
+    const fp = fromKey.split(',');
+    const cc = Number(cp[0]);
+    const cr = Number(cp[1]);
+    const fc = Number(fp[0]);
+    const fr = Number(fp[1]);
+    if (!Number.isFinite(cc) || !Number.isFinite(cr) || !Number.isFinite(fc) || !Number.isFinite(fr)) return false;
+    const incomingDir = factoryDirectionFromTo(fc, fr, cc, cr);
+    if (incomingDir < 0) return false;
+    const outDir = factoryCombinerDir(combinerKey);
+    const leftIn = (outDir + 1) % 4;
+    const rightIn = (outDir + 3) % 4;
+    return incomingDir === leftIn || incomingDir === rightIn;
+}
+
+/**
  * Extractors → adjacent transporters; belts → storage, empty transporters, or combiners (intake/merge);
  * combiners eject along output dir onto empty transporters.
  */
@@ -1871,6 +1907,7 @@ function factoryRunSimTick() {
         } else if (destPl === 'transporter' && !work[destKey]) {
             movesTT.push({ from: key, to: destKey, id: itemId });
         } else if (destPl === 'combiner') {
+            if (!factoryCombinerCanAcceptFrom(destKey, key)) continue;
             if (state.factory.combinerDiscovery[destKey]) continue;
             if (!work[destKey]) {
                 movesToEmptyCombiner.push({ from: key, to: destKey, id: itemId });
@@ -3912,6 +3949,7 @@ function createElementOnCanvas(data, x, y) {
         emoji,
         name: nameText,
         nameColor,
+        iconPath: typeof data.iconPath === 'string' ? data.iconPath : '',
         x: canvasX,
         y: canvasY
     };
@@ -3939,11 +3977,15 @@ function renderCanvas() {
             const icon = typeof item.emoji === 'string' ? item.emoji : splitLabel(item.name).icon;
             const text = typeof item.name === 'string' ? item.name : splitLabel(item.name).text;
             const nameStyle = item.nameColor ? ` style="color:${item.nameColor}"` : '';
+            const iconSrc = iconSrcForItem(item);
+            const iconMarkup = iconSrc
+                ? `<img src="${iconSrc}" alt="" class="w-10 h-10 object-contain pointer-events-none" />`
+                : `<span class="text-4xl pointer-events-none">${icon}</span>`;
             el = document.createElement('div');
             el.className = 'canvas-element w-20 h-24 bg-slate-800/80 backdrop-blur-md border border-slate-600 rounded-xl shadow-2xl flex flex-col items-center justify-center cursor-move z-20';
             el.dataset.uid = item.uid;
             el.innerHTML = `
-                <span class="text-4xl pointer-events-none">${icon}</span>
+                ${iconMarkup}
                 <span class="text-[10px] uppercase font-bold text-slate-400 mt-2 pointer-events-none text-center px-1 leading-tight"${nameStyle}>${text}</span>
             `;
 
