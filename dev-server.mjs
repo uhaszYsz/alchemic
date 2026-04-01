@@ -402,6 +402,22 @@ function imageExtFromBuffer(buf) {
     if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
     if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
     if (buf.length >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return '.gif';
+    if (
+        buf.length >= 12 &&
+        buf[0] === 0x52 &&
+        buf[1] === 0x49 &&
+        buf[2] === 0x46 &&
+        buf[3] === 0x46 &&
+        buf[8] === 0x57 &&
+        buf[9] === 0x45 &&
+        buf[10] === 0x42 &&
+        buf[11] === 0x50
+    ) {
+        return '.webp';
+    }
+    // SVG can include XML/BOM/whitespace; detect "<svg" in first chunk.
+    const probe = buf.slice(0, Math.min(buf.length, 512)).toString('utf8').replace(/^\uFEFF/, '').trimStart();
+    if (/^<svg[\s>]/i.test(probe) || /^<\?xml[\s\S]*?<svg[\s>]/i.test(probe)) return '.svg';
     return null;
 }
 
@@ -1277,7 +1293,7 @@ const server = http.createServer((req, res) => {
                 await ensureImagesDir();
                 const buf = await fetchIconBufferFromUrlOrData(imageUrl, imageDataUrl);
                 const ext = imageExtFromBuffer(buf);
-                if (!ext) return send(res, 400, 'Image must be JPEG, PNG, or GIF.', CORS_API);
+                if (!ext) return send(res, 400, 'Image must be JPEG, PNG, GIF, WEBP, or SVG.', CORS_API);
                 const strictErr = validateStrictUserIconBytes(buf, ext);
                 if (strictErr) return send(res, 413, strictErr, CORS_API);
                 const safeItem = itemId.replace(/[^a-zA-Z0-9_-]/g, '_') || 'item';
@@ -1355,7 +1371,9 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.method === 'GET' && pathOnly.startsWith('/images/')) {
-        const filePath = staticFileFromRoot(pathOnly, imagesRoot);
+        // Map URL "/images/foo.png" -> file under imagesRoot as "foo.png".
+        const relImageUrlPath = `/${pathOnly.replace(/^\/images\/+/, '')}`;
+        const filePath = staticFileFromRoot(relImageUrlPath, imagesRoot);
         if (!filePath) return send(res, 403, 'Forbidden');
         return serveFile(res, filePath);
     }

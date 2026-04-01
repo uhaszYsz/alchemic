@@ -2186,7 +2186,7 @@ function resetDiscoveryAiImagePreview() {
 /** @returns {string} */
 function defaultDiscoveryImageQueryFromName() {
     const itemName = getDiscoveryChosenName() || (state.discoveryIconItemName || '').trim() || 'item';
-    return `${itemName} svg icon`;
+    return `${itemName} icon`;
 }
 
 /** @returns {string} */
@@ -4078,6 +4078,9 @@ if (discoveryAiImageQueryInput) {
         ev.preventDefault();
         discoveryIconSearchPage = 0;
         void generateDiscoveryIconPreview(0);
+    });
+    discoveryAiImageQueryInput.addEventListener('blur', () => {
+        syncDiscoveryImageQueryInput();
     });
 }
 if (discoveryAiImagePrevBtn) {
