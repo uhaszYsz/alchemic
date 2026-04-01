@@ -523,10 +523,37 @@ function tickAllFactories() {
             }
             guard++;
         }
+        if (!st._factoryDebugProducedTotal || typeof st._factoryDebugProducedTotal !== 'object') {
+            st._factoryDebugProducedTotal = {};
+        }
         if (Object.keys(totalDelta).length) {
             // Persist produced items immediately to DB inventory (server-authoritative).
             addToUserInventory(db, Number(userId) | 0, totalDelta);
             addProducedToMinuteStats(st, now, totalDelta);
+            for (const [itemId, qty] of Object.entries(totalDelta)) {
+                const n = Number(qty) | 0;
+                if (!itemId || n <= 0) continue;
+                st._factoryDebugProducedTotal[itemId] = (Number(st._factoryDebugProducedTotal[itemId] || 0) | 0) + n;
+            }
+        }
+        const dbgStatsLast = Number(st._factoryDebugStatsLastLogAt || 0);
+        if (!dbgStatsLast || now - dbgStatsLast >= 5000) {
+            st._factoryDebugStatsLastLogAt = now;
+            let extractors = 0;
+            let transporters = 0;
+            let combiners = 0;
+            let storages = 0;
+            for (const p of Object.values(st.placements || {})) {
+                if (p === 'extractor') extractors++;
+                else if (p === 'transporter') transporters++;
+                else if (p === 'combiner') combiners++;
+                else if (p === 'storage') storages++;
+            }
+            console.log(
+                `[factory-debug] user=${Number(userId) | 0} extractors=${extractors} transporters=${transporters} combiners=${combiners} storages=${storages} carried=${Object.keys(
+                    st.cellItems || {}
+                ).length} produced=${JSON.stringify(st._factoryDebugProducedTotal || {})}`
+            );
         }
     }
 }
@@ -1344,9 +1371,9 @@ const server = http.createServer((req, res) => {
                         : {};
                 activateFactoryRunWindow(st, Date.now());
                 console.log(
-                    `[factory-run-start] user=${auth.userId} placements=${Object.keys(st.placements || {}).length} loopMs=${factoryLoopIntervalMs(
-                        st
-                    )}`
+                    `[factory-run-start] user=${auth.userId} placements=${Object.keys(st.placements || {}).length} transporters=${Object.keys(
+                        st.transporterDirs || {}
+                    ).length} combiners=${Object.keys(st.combinerDirs || {}).length} loopMs=${factoryLoopIntervalMs(st)}`
                 );
                 factoryStateByUser.set(auth.userId, st);
                 persistFactoryState(auth.userId, st);
