@@ -484,11 +484,13 @@ async function proxyOpenAI(req, res, target) {
  * Server-side DuckDuckGo image search (no browser CORS issues).
  * @param {string} query
  * @param {number} limit
+ * @param {number} offset
  * @returns {Promise<string[]>}
  */
-async function fetchDuckDuckGoImageCandidatesServer(query, limit) {
+async function fetchDuckDuckGoImageCandidatesServer(query, limit, offset) {
     const q = String(query || '').trim();
     const max = Math.max(1, Math.min(12, Number(limit || 6) | 0));
+    const start = Math.max(0, Number(offset || 0) | 0);
     if (!q) return [];
     const pageUrl = `https://duckduckgo.com/?q=${encodeURIComponent(q)}&iax=images&ia=images`;
     const pageRes = await fetch(pageUrl, {
@@ -507,7 +509,8 @@ async function fetchDuckDuckGoImageCandidatesServer(query, limit) {
     if (!vqd) throw new Error('DuckDuckGo token missing in response.');
     const apiUrl =
         `https://duckduckgo.com/i.js?o=json&l=wt-wt&p=1` +
-        `&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}`;
+        `&q=${encodeURIComponent(q)}&vqd=${encodeURIComponent(vqd)}` +
+        `&s=${start}`;
     const imgRes = await fetch(apiUrl, {
         headers: {
             'User-Agent': 'Mozilla/5.0',
@@ -1114,9 +1117,11 @@ const server = http.createServer((req, res) => {
                 if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
                 const query = typeof body.query === 'string' ? body.query.trim() : '';
                 const limitRaw = Number(body.limit);
+                const offsetRaw = Number(body.offset);
                 const limit = Number.isFinite(limitRaw) ? limitRaw : 6;
+                const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
                 if (!query) return send(res, 400, 'query required', CORS_API);
-                const images = await fetchDuckDuckGoImageCandidatesServer(query, limit);
+                const images = await fetchDuckDuckGoImageCandidatesServer(query, limit, offset);
                 sendJson(res, 200, { images }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
@@ -1227,7 +1232,7 @@ const server = http.createServer((req, res) => {
                 const vote = body.vote === 'down' ? 'down' : body.vote === 'up' ? 'up' : '';
                 if (!id || !vote) return send(res, 400, 'id and vote required', CORS_API);
                 const out = voteOnItem(db, id, vote);
-                if (!out) return send(res, 409, 'Voting allowed only for discoveries from last 5 days.', CORS_API);
+                if (!out) return send(res, 409, 'Voting unavailable for this item.', CORS_API);
                 sendJson(res, 200, { ok: true, id, upvotes: out.upvotes, downvotes: out.downvotes }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
@@ -1264,7 +1269,7 @@ const server = http.createServer((req, res) => {
                         proposedName,
                         createdBy: auth.userId
                     });
-                    if (!out) return send(res, 409, 'Only recent discoveries (<= 5 days) can start votes.', CORS_API);
+                    if (!out) return send(res, 409, 'Cannot create proposal for this item.', CORS_API);
                     return sendJson(res, 200, { ok: true, proposalId: out.id }, CORS_API);
                 }
                 const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
@@ -1285,7 +1290,7 @@ const server = http.createServer((req, res) => {
                     proposedImagePath: rel,
                     createdBy: auth.userId
                 });
-                if (!out) return send(res, 409, 'Only recent discoveries (<= 5 days) can start votes.', CORS_API);
+                if (!out) return send(res, 409, 'Cannot create proposal for this item.', CORS_API);
                 return sendJson(res, 200, { ok: true, proposalId: out.id, proposedImagePath: rel }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));

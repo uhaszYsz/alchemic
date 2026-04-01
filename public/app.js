@@ -174,7 +174,7 @@ async function fetchChatCompletions(body) {
 
 /**
  * Server-side image search; avoids browser CORS.
- * @param {{ query: string, limit?: number }} body
+ * @param {{ query: string, limit?: number, offset?: number }} body
  * @returns {Promise<{ images: string[] }>}
  */
 async function fetchImageSearchResults(body) {
@@ -1173,7 +1173,6 @@ function renderGlobalDiscoveriesPage() {
         globalDiscoveriesListEl.appendChild(empty);
     } else {
         for (const row of pageRows) {
-            const voteEligible = isRowVoteEligible(row);
             const upvotes = Math.max(0, Number(row.upvotes || 0) | 0);
             const downvotes = Math.max(0, Number(row.downvotes || 0) | 0);
             const comboText =
@@ -1221,33 +1220,31 @@ function renderGlobalDiscoveriesPage() {
             deleteBtn.setAttribute('data-id', row.id);
             deleteBtn.textContent = 'Delete';
             right.appendChild(deleteBtn);
-            if (voteEligible) {
-                const upBtn = document.createElement('button');
-                upBtn.type = 'button';
-                upBtn.className = 'vote-pill vote-pill--up';
-                upBtn.setAttribute('data-discovery-vote-btn', '1');
-                upBtn.setAttribute('data-vote', 'up');
-                upBtn.setAttribute('data-id', row.id);
-                upBtn.textContent = `👍 ${upvotes}`;
-                right.appendChild(upBtn);
+            const upBtn = document.createElement('button');
+            upBtn.type = 'button';
+            upBtn.className = 'vote-pill vote-pill--up';
+            upBtn.setAttribute('data-discovery-vote-btn', '1');
+            upBtn.setAttribute('data-vote', 'up');
+            upBtn.setAttribute('data-id', row.id);
+            upBtn.textContent = `👍 ${upvotes}`;
+            right.appendChild(upBtn);
 
-                const downBtn = document.createElement('button');
-                downBtn.type = 'button';
-                downBtn.className = 'vote-pill vote-pill--down';
-                downBtn.setAttribute('data-discovery-vote-btn', '1');
-                downBtn.setAttribute('data-vote', 'down');
-                downBtn.setAttribute('data-id', row.id);
-                downBtn.textContent = `👎 ${downvotes}`;
-                right.appendChild(downBtn);
+            const downBtn = document.createElement('button');
+            downBtn.type = 'button';
+            downBtn.className = 'vote-pill vote-pill--down';
+            downBtn.setAttribute('data-discovery-vote-btn', '1');
+            downBtn.setAttribute('data-vote', 'down');
+            downBtn.setAttribute('data-id', row.id);
+            downBtn.textContent = `👎 ${downvotes}`;
+            right.appendChild(downBtn);
 
-                const proposalBtn = document.createElement('button');
-                proposalBtn.type = 'button';
-                proposalBtn.className = 'vote-pill vote-pill--up';
-                proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
-                proposalBtn.setAttribute('data-id', row.id);
-                proposalBtn.textContent = '🗳️ Vote';
-                right.appendChild(proposalBtn);
-            }
+            const proposalBtn = document.createElement('button');
+            proposalBtn.type = 'button';
+            proposalBtn.className = 'vote-pill vote-pill--up';
+            proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
+            proposalBtn.setAttribute('data-id', row.id);
+            proposalBtn.textContent = '🗳️ Vote';
+            right.appendChild(proposalBtn);
             top.appendChild(right);
             wrap.appendChild(top);
 
@@ -1258,7 +1255,7 @@ function renderGlobalDiscoveriesPage() {
             if (!props.length) {
                 const none = document.createElement('div');
                 none.className = 'text-xs text-slate-500';
-                none.textContent = voteEligible ? 'No active proposals yet. Use Vote... to start one.' : 'Voting window closed.';
+                none.textContent = 'No active proposals yet. Use Vote... to start one.';
                 expanded.appendChild(none);
             } else {
                 props.forEach((p) => {
@@ -1972,6 +1969,9 @@ const discoveryUploadIconFileInput = /** @type {HTMLInputElement | null} */ (
 const discoveryAiImageStatus = document.getElementById('discovery-ai-image-status');
 const discoveryAiImageImg = document.getElementById('discovery-ai-image-img');
 const discoveryAiImageGridEl = document.getElementById('discovery-ai-image-grid');
+const discoveryAiImagePrevBtn = document.getElementById('discovery-ai-image-prev');
+const discoveryAiImageNextBtn = document.getElementById('discovery-ai-image-next');
+const discoveryAiImagePageEl = document.getElementById('discovery-ai-image-page');
 const saveDiscoveryBtn = document.getElementById('save-discovery');
 const rejectDiscoveryBtn = document.getElementById('reject-discovery');
 const discoveryNameInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-name-input'));
@@ -1979,8 +1979,10 @@ const discoveryEmojiInputEl = /** @type {HTMLInputElement | null} */ (document.g
 const discoveryNameColorGridEl = document.getElementById('discovery-name-color-grid');
 
 /** How many icon candidates to show for each client-side search. */
-const DISCOVERY_ICON_VARIANT_COUNT = 6;
+const DISCOVERY_ICON_VARIANT_COUNT = 8;
 let lastAutoIconSearchQuery = '';
+let discoveryIconSearchPage = 0;
+let discoveryIconSearchLastCount = 0;
 
 const AI_REPLY_BASE_CLASS =
     'text-[11px] leading-snug whitespace-pre-wrap break-words max-h-64 overflow-y-auto rounded-lg border p-2.5';
@@ -2092,6 +2094,14 @@ function clearDiscoveryAiImageGrid() {
     });
 }
 
+function syncDiscoveryImagePagerUi() {
+    if (discoveryAiImagePageEl) discoveryAiImagePageEl.textContent = `Page ${discoveryIconSearchPage + 1}`;
+    if (discoveryAiImagePrevBtn) discoveryAiImagePrevBtn.disabled = discoveryIconSearchPage <= 0;
+    if (discoveryAiImageNextBtn) {
+        discoveryAiImageNextBtn.disabled = discoveryIconSearchLastCount < DISCOVERY_ICON_VARIANT_COUNT;
+    }
+}
+
 /**
  * @param {string} url
  * @param {HTMLElement} selectedBtn
@@ -2154,6 +2164,8 @@ function resetDiscoveryAiImagePreview() {
     state.discoveryPreviewUrl = '';
     state.discoveryIconItemId = '';
     lastAutoIconSearchQuery = '';
+    discoveryIconSearchPage = 0;
+    discoveryIconSearchLastCount = 0;
     if (discoveryAiImageBtn) discoveryAiImageBtn.disabled = false;
     if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
     if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = false;
@@ -2161,6 +2173,7 @@ function resetDiscoveryAiImagePreview() {
     if (discoveryIconUrlInput) discoveryIconUrlInput.value = '';
     if (discoveryUploadIconFileInput) discoveryUploadIconFileInput.value = '';
     if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = '';
+    syncDiscoveryImagePagerUi();
     clearDiscoveryAiImageGrid();
     if (discoveryAiImageImg) {
         discoveryAiImageImg.removeAttribute('src');
@@ -2171,7 +2184,7 @@ function resetDiscoveryAiImagePreview() {
 /** @returns {string} */
 function buildDiscoveryImageQuery() {
     const itemName = getDiscoveryChosenName() || (state.discoveryIconItemName || '').trim() || 'item';
-    return `${itemName} flat icon`;
+    return `${itemName} svg color icon`;
 }
 
 function setDiscoveryStep(step) {
@@ -2180,12 +2193,15 @@ function setDiscoveryStep(step) {
     if (discoveryStepImageEl) discoveryStepImageEl.classList.toggle('hidden', isName);
 }
 
-async function generateDiscoveryIconPreview() {
+async function generateDiscoveryIconPreview(targetPage) {
     if (!discoveryAiImageBtn) return;
+    const page = Math.max(0, Number(targetPage ?? discoveryIconSearchPage) | 0);
     discoveryAiImageBtn.disabled = true;
     if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
+    if (discoveryAiImagePrevBtn) discoveryAiImagePrevBtn.disabled = true;
+    if (discoveryAiImageNextBtn) discoveryAiImageNextBtn.disabled = true;
     if (discoveryAiImageStatus) {
-        discoveryAiImageStatus.textContent = 'Generating icon…';
+        discoveryAiImageStatus.textContent = 'Searching icons…';
     }
     if (discoveryAiImageImg) {
         discoveryAiImageImg.classList.add('hidden');
@@ -2194,9 +2210,15 @@ async function generateDiscoveryIconPreview() {
     clearDiscoveryAiImageGrid();
     try {
         const query = buildDiscoveryImageQuery();
-        const out = await fetchImageSearchResults({ query, limit: DISCOVERY_ICON_VARIANT_COUNT });
+        const out = await fetchImageSearchResults({
+            query,
+            limit: DISCOVERY_ICON_VARIANT_COUNT,
+            offset: page * DISCOVERY_ICON_VARIANT_COUNT
+        });
         const urls = Array.isArray(out && out.images) ? out.images : [];
         if (!urls.length) throw new Error('No image URLs in response');
+        discoveryIconSearchPage = page;
+        discoveryIconSearchLastCount = urls.length;
         renderDiscoveryAiCandidates(urls);
         if (discoveryAiImageStatus) {
             discoveryAiImageStatus.textContent = 'Select one image, then Confirm discovery to save it.';
@@ -2204,6 +2226,7 @@ async function generateDiscoveryIconPreview() {
     } catch (err) {
         let msg = err && typeof err.message === 'string' ? err.message : String(err);
         state.discoveryPreviewUrl = '';
+        discoveryIconSearchLastCount = 0;
         clearDiscoveryAiImageGrid();
         if (discoveryAiImageStatus) {
             discoveryAiImageStatus.textContent = `Icon search failed. ${msg.slice(0, 220)}`;
@@ -2211,6 +2234,7 @@ async function generateDiscoveryIconPreview() {
     } finally {
         discoveryAiImageBtn.disabled = false;
         if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
+        syncDiscoveryImagePagerUi();
     }
 }
 
@@ -2218,7 +2242,8 @@ function autoSearchDiscoveryIconsFromSuggestion() {
     const query = buildDiscoveryImageQuery();
     if (!query || query === lastAutoIconSearchQuery) return;
     lastAutoIconSearchQuery = query;
-    void generateDiscoveryIconPreview();
+    discoveryIconSearchPage = 0;
+    void generateDiscoveryIconPreview(0);
 }
 
 function upsertDiscoveryLocalRecord(id, emoji, name, nameColor, ingredientA, ingredientB) {
@@ -4027,7 +4052,19 @@ function openDiscoveryModal(pending, preloadedParsed) {
 
 if (discoveryAiImageBtn) {
     discoveryAiImageBtn.addEventListener('click', () => {
-        void generateDiscoveryIconPreview();
+        discoveryIconSearchPage = 0;
+        void generateDiscoveryIconPreview(0);
+    });
+}
+if (discoveryAiImagePrevBtn) {
+    discoveryAiImagePrevBtn.addEventListener('click', () => {
+        if (discoveryIconSearchPage <= 0) return;
+        void generateDiscoveryIconPreview(discoveryIconSearchPage - 1);
+    });
+}
+if (discoveryAiImageNextBtn) {
+    discoveryAiImageNextBtn.addEventListener('click', () => {
+        void generateDiscoveryIconPreview(discoveryIconSearchPage + 1);
     });
 }
 
@@ -4362,7 +4399,7 @@ if (globalDiscoveriesListEl) {
                       : '';
             if (!id || !vote) return;
             const row = globalDiscoveriesRows.find((r) => r.id === id);
-            if (!row || !isRowVoteEligible(row)) return;
+            if (!row) return;
             const buttons = globalDiscoveriesListEl.querySelectorAll(`[data-discovery-vote-btn="1"][data-id="${id}"]`);
             buttons.forEach((b) => b.setAttribute('disabled', 'disabled'));
             try {

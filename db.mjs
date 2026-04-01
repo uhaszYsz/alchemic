@@ -299,7 +299,7 @@ export function setItemIconPath(db, id, iconPathRelative) {
  * @param {string} itemId
  * @returns {boolean}
  */
-function isVoteWindowDiscoveryItem(db, itemId) {
+function isDiscoveryItem(db, itemId) {
     const row = db
         .prepare(
             `SELECT id
@@ -307,8 +307,6 @@ function isVoteWindowDiscoveryItem(db, itemId) {
              WHERE id = ?
                AND ingredient_a IS NOT NULL AND ingredient_a != ''
                AND ingredient_b IS NOT NULL AND ingredient_b != ''
-               AND discovered_at IS NOT NULL AND discovered_at != ''
-               AND (julianday('now') - julianday(discovered_at)) <= 5
              LIMIT 1`
         )
         .get(String(itemId || '').trim());
@@ -332,7 +330,7 @@ export function createDiscoveryProposal(db, input) {
     if (!itemId || !proposalType) return null;
     if (proposalType === 'name' && !proposedName) return null;
     if (proposalType === 'image' && !proposedImagePath) return null;
-    if (!isVoteWindowDiscoveryItem(db, itemId)) return null;
+    if (!isDiscoveryItem(db, itemId)) return null;
     const out = db
         .prepare(
             `INSERT INTO discovery_proposals (item_id, proposal_type, proposed_name, proposed_image_path, created_by)
@@ -366,8 +364,6 @@ export function voteOnDiscoveryProposal(db, proposalId, userId, direction) {
              WHERE p.id = ?
                AND i.ingredient_a IS NOT NULL AND i.ingredient_a != ''
                AND i.ingredient_b IS NOT NULL AND i.ingredient_b != ''
-               AND i.discovered_at IS NOT NULL AND i.discovered_at != ''
-               AND (julianday('now') - julianday(i.discovered_at)) <= 5
              LIMIT 1`
         )
         .get(Number(proposalId));
@@ -444,8 +440,8 @@ export function listDiscoveryProposalsByItem(db, itemId, userId) {
 }
 
 /**
- * Increment upvote/downvote counters for recent discoveries (<= 5 days old).
- * Returns null when item not found / too old / not a discovery.
+ * Increment upvote/downvote counters for discoveries.
+ * Returns null when item not found or not a discovery.
  * @param {import('better-sqlite3').Database} db
  * @param {string} id
  * @param {'up' | 'down'} direction
@@ -460,9 +456,7 @@ export function voteOnItem(db, id, direction) {
                  downvotes = downvotes + CASE WHEN @dir = 'down' THEN 1 ELSE 0 END
              WHERE id = @id
                AND ingredient_a IS NOT NULL AND ingredient_a != ''
-               AND ingredient_b IS NOT NULL AND ingredient_b != ''
-               AND discovered_at IS NOT NULL AND discovered_at != ''
-               AND (julianday('now') - julianday(discovered_at)) <= 5`
+               AND ingredient_b IS NOT NULL AND ingredient_b != ''`
         )
         .run({ id: String(id || '').trim(), dir });
     if (!result || result.changes < 1) return null;
