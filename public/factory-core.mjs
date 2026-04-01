@@ -53,6 +53,14 @@ function sourceColRowFromInputDir(destCol, destRow, inputDir) {
     return { col: destCol, row: destRow + 1 };
 }
 
+function inputDirFromTransporterOutputDir(outDir) {
+    const d = ((Number(outDir) | 0) + 4) % 4;
+    if (d === 0) return 1; // up
+    if (d === 1) return 0; // right
+    if (d === 2) return 3; // down
+    return 2; // left
+}
+
 function ensureTransporterConflictState(state, getTransporterDir) {
     const signatureParts = [];
     const transporterKeys = Object.entries(state.placements || {})
@@ -87,8 +95,14 @@ function ensureTransporterConflictState(state, getTransporterDir) {
     const nextCursor = {};
     const prevCursor = state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : {};
     for (const destKey of Object.keys(conflictInputs)) {
-        const prev = Number(prevCursor[destKey] || 0) | 0;
-        nextCursor[destKey] = ((prev % 4) + 4) % 4;
+        const prev = ((Number(prevCursor[destKey] || 0) | 0) + 4) % 4;
+        const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(destKey));
+        let cur = prev;
+        for (let i = 0; i < 4; i++) {
+            if (cur !== skipDir) break;
+            cur = (cur + 1) % 4;
+        }
+        nextCursor[destKey] = cur;
     }
     state._ttConflictSig = sig;
     state._ttConflictInputs = conflictInputs;
@@ -235,8 +249,10 @@ export function simulateFactoryStep(state, deps) {
         const d = factoryKeyToColRow(destKey);
         if (!Number.isFinite(d.col) || !Number.isFinite(d.row)) continue;
         const startDir = ((Number(cursorMap[destKey] || 0) | 0) + 4) % 4;
+        const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(destKey));
         for (let i = 0; i < 4; i++) {
             const dir = (startDir + i) % 4;
+            if (dir === skipDir) continue;
             if (!dirs.includes(dir)) continue;
             const src = sourceColRowFromInputDir(d.col, d.row, dir);
             const srcKey = factoryPlacementKey(src.col, src.row);
@@ -265,8 +281,13 @@ export function simulateFactoryStep(state, deps) {
         movesTT.push(m);
         // Advance accepted input direction only after successful receive into this transporter.
         if (acceptedFromByDest[m.to] && acceptedFromByDest[m.to] === m.from) {
-            const cur = ((Number(cursorMap[m.to] || 0) | 0) + 4) % 4;
-            cursorMap[m.to] = (cur + 1) % 4;
+            const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(m.to));
+            let next = (((Number(cursorMap[m.to] || 0) | 0) + 4) % 4 + 1) % 4;
+            for (let i = 0; i < 4; i++) {
+                if (next !== skipDir) break;
+                next = (next + 1) % 4;
+            }
+            cursorMap[m.to] = next;
         }
     }
     state._ttInputCursor = cursorMap;
