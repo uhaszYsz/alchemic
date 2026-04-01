@@ -1292,6 +1292,14 @@ const server = http.createServer((req, res) => {
                 const st = sanitizeFactoryState(body.factory);
                 st._factoryPendingProduced = sanitizeInventoryMap(prev._factoryPendingProduced);
                 st._factoryRunStoppedAtIso = prev._factoryRunStoppedAtIso || null;
+                st._factoryCurrentProducedPerMinute =
+                    prev._factoryCurrentProducedPerMinute && typeof prev._factoryCurrentProducedPerMinute === 'object'
+                        ? { ...prev._factoryCurrentProducedPerMinute }
+                        : {};
+                st._factoryLastProducedPerMinute =
+                    prev._factoryLastProducedPerMinute && typeof prev._factoryLastProducedPerMinute === 'object'
+                        ? { ...prev._factoryLastProducedPerMinute }
+                        : {};
                 activateFactoryRunWindow(st, Date.now());
                 factoryStateByUser.set(auth.userId, st);
                 persistFactoryState(auth.userId, st);

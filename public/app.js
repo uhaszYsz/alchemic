@@ -2332,7 +2332,7 @@ function factoryRunSimTick() {
         delete work[dep.from];
         invDelta[dep.id] = (invDelta[dep.id] || 0) + 1;
     }
-    addItemsToPlayerInventory(invDelta);
+    // Inventory is server-authoritative. Client simulation should not mutate it locally.
 
     movesTT.sort((a, b) => a.from.localeCompare(b.from));
     const destClaimed = new Set();
@@ -3889,6 +3889,7 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         const tDir = factoryTransporterDir(key);
         const angle = (tDir * Math.PI) / 2;
         ctx.save();
+        ctx.globalAlpha = 0.5;
         ctx.translate(midX, midY);
         ctx.rotate(angle);
         const rw = w * 0.42;
