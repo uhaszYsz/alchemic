@@ -104,6 +104,7 @@ const GLOBAL_DISCOVERIES_PER_PAGE = 50;
 let globalDiscoveriesRows = [];
 let globalDiscoveriesPage = 1;
 let globalDiscoveriesSort = 'datetime';
+let globalDiscoveriesViewMode = 'tree';
 let globalDiscoveriesExpandedId = '';
 let dbViewerTables = [];
 let dbViewerSelectedTable = '';
@@ -1376,167 +1377,245 @@ function setDiscoveryImageProposalModalOpen(open) {
     discoveryImageProposalModalEl.classList.toggle('hidden', !open);
 }
 
-function renderGlobalDiscoveriesPage() {
-    if (!globalDiscoveriesListEl) return;
-    const ordered = [...globalDiscoveriesRows];
+function compareGlobalDiscoveriesRows(a, b) {
     if (globalDiscoveriesSort === 'name') {
-        ordered.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+        return a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+    }
+    const ta = a.discoveredAt ? Date.parse(a.discoveredAt) : Number.NEGATIVE_INFINITY;
+    const tb = b.discoveredAt ? Date.parse(b.discoveredAt) : Number.NEGATIVE_INFINITY;
+    if (tb !== ta) return tb - ta;
+    return a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+}
+
+/**
+ * @param {any} row
+ * @param {number} depth
+ * @returns {HTMLElement}
+ */
+function buildGlobalDiscoveryRowElement(row, depth) {
+    const upvotes = Math.max(0, Number(row.upvotes || 0) | 0);
+    const downvotes = Math.max(0, Number(row.downvotes || 0) | 0);
+    const comboText =
+        row.ingredientAText && row.ingredientBText
+            ? `${row.ingredientAEmoji || '·'} ${row.ingredientAText} + ${row.ingredientBEmoji || '·'} ${row.ingredientBText}`
+            : 'Starter item';
+
+    const wrap = document.createElement('div');
+    wrap.className = 'px-4 py-2.5';
+    if (depth > 0) wrap.style.paddingLeft = `${16 + depth * 18}px`;
+    wrap.setAttribute('data-discovery-item-id', row.id);
+
+    const top = document.createElement('div');
+    top.className = 'flex items-center gap-3';
+    top.setAttribute('data-discovery-expand-toggle', row.id);
+
+    const iconWrap = document.createElement('div');
+    iconWrap.className =
+        'w-8 h-8 rounded-md border border-slate-600 bg-slate-900/70 shrink-0 flex items-center justify-center overflow-hidden';
+    const iconSrc = iconSrcForItem(row);
+    if (iconSrc) {
+        const iconImg = document.createElement('img');
+        iconImg.className = 'w-full h-full object-contain';
+        iconImg.src = iconSrc;
+        iconImg.alt = `${row.name} icon`;
+        iconWrap.appendChild(iconImg);
     } else {
-        ordered.sort((a, b) => {
-            const ta = a.discoveredAt ? Date.parse(a.discoveredAt) : Number.NEGATIVE_INFINITY;
-            const tb = b.discoveredAt ? Date.parse(b.discoveredAt) : Number.NEGATIVE_INFINITY;
-            if (tb !== ta) return tb - ta;
-            return a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+        const emojiEl = document.createElement('span');
+        emojiEl.className = 'text-xl leading-none select-none';
+        emojiEl.setAttribute('aria-hidden', 'true');
+        emojiEl.textContent = row.emoji || '·';
+        iconWrap.appendChild(emojiEl);
+    }
+    top.appendChild(iconWrap);
+
+    const textWrap = document.createElement('div');
+    textWrap.className = 'min-w-0 flex-1';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'text-sm text-slate-100 truncate';
+    if (row.nameColor) nameEl.style.color = row.nameColor;
+    nameEl.textContent = row.name;
+    const comboEl = document.createElement('div');
+    comboEl.className = 'text-[11px] text-slate-400 truncate';
+    comboEl.textContent = comboText;
+    const metaEl = document.createElement('div');
+    metaEl.className = 'text-[11px] text-slate-500 truncate';
+    const discoveredBy = row.discoveredByUsername ? row.discoveredByUsername : 'system';
+    const metaParts = [`Discovered by: ${discoveredBy}`];
+    if (row.discoveredAt) metaParts.push(new Date(row.discoveredAt).toLocaleString());
+    if (Number.isFinite(Number(row.iconSizeBytes)) && Number(row.iconSizeBytes) > 0) {
+        metaParts.push(`Icon: ${formatKbValue(row.iconSizeBytes)} KB`);
+    }
+    metaEl.textContent = metaParts.join(' | ');
+    textWrap.appendChild(nameEl);
+    textWrap.appendChild(comboEl);
+    textWrap.appendChild(metaEl);
+    top.appendChild(textWrap);
+
+    const right = document.createElement('div');
+    right.className = 'ml-2 shrink-0 flex items-center gap-1.5';
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'vote-pill vote-pill--down';
+    deleteBtn.setAttribute('data-discovery-delete-btn', '1');
+    deleteBtn.setAttribute('data-id', row.id);
+    deleteBtn.textContent = 'Delete';
+    right.appendChild(deleteBtn);
+    const upBtn = document.createElement('button');
+    upBtn.type = 'button';
+    upBtn.className = 'vote-pill vote-pill--up';
+    upBtn.setAttribute('data-discovery-vote-btn', '1');
+    upBtn.setAttribute('data-vote', 'up');
+    upBtn.setAttribute('data-id', row.id);
+    upBtn.textContent = `👍 ${upvotes}`;
+    right.appendChild(upBtn);
+
+    const downBtn = document.createElement('button');
+    downBtn.type = 'button';
+    downBtn.className = 'vote-pill vote-pill--down';
+    downBtn.setAttribute('data-discovery-vote-btn', '1');
+    downBtn.setAttribute('data-vote', 'down');
+    downBtn.setAttribute('data-id', row.id);
+    downBtn.textContent = `👎 ${downvotes}`;
+    right.appendChild(downBtn);
+
+    const proposalBtn = document.createElement('button');
+    proposalBtn.type = 'button';
+    proposalBtn.className = 'vote-pill vote-pill--up';
+    proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
+    proposalBtn.setAttribute('data-id', row.id);
+    proposalBtn.textContent = '🗳️ Vote';
+    right.appendChild(proposalBtn);
+    top.appendChild(right);
+    wrap.appendChild(top);
+
+    const expanded = document.createElement('div');
+    expanded.className = 'mt-2 ml-8 border border-slate-700 rounded-lg bg-slate-900/60 p-2 hidden';
+    expanded.setAttribute('data-discovery-expanded', row.id);
+    const props = discoveryProposalsByItem[row.id] || [];
+    if (!props.length) {
+        const none = document.createElement('div');
+        none.className = 'text-xs text-slate-500';
+        none.textContent = 'No active proposals yet. Use Vote... to start one.';
+        expanded.appendChild(none);
+    } else {
+        props.forEach((p) => {
+            const line = document.createElement('div');
+            line.className = 'mb-2 last:mb-0 rounded border border-slate-700 bg-slate-950/50 p-2';
+            const title = document.createElement('div');
+            title.className = 'text-xs text-slate-200';
+            title.textContent = p.proposalType === 'name' ? `Name: ${p.proposedName || ''}` : 'Image proposal';
+            line.appendChild(title);
+            if (p.proposalType === 'image' && p.proposedImagePath) {
+                const img = document.createElement('img');
+                img.className = 'mt-1 w-16 h-16 object-contain rounded border border-slate-600 bg-slate-900';
+                img.src = proposalImageSrc(p.proposedImagePath);
+                img.alt = 'Proposed icon';
+                line.appendChild(img);
+            }
+            const footer = document.createElement('div');
+            footer.className = 'mt-2 flex items-center gap-1.5';
+            const up = document.createElement('button');
+            up.type = 'button';
+            up.className = `vote-pill ${p.myVote === 1 ? 'vote-pill--selected-up' : 'vote-pill--up'}`;
+            up.setAttribute('data-discovery-proposal-vote-btn', '1');
+            up.setAttribute('data-proposal-vote', 'up');
+            up.setAttribute('data-proposal-id', String(p.id));
+            up.setAttribute('data-item-id', row.id);
+            up.textContent = `👍 ${Math.max(0, Number(p.upvotes || 0) | 0)}`;
+            footer.appendChild(up);
+            const down = document.createElement('button');
+            down.type = 'button';
+            down.className = `vote-pill ${p.myVote === -1 ? 'vote-pill--selected-down' : 'vote-pill--down'}`;
+            down.setAttribute('data-discovery-proposal-vote-btn', '1');
+            down.setAttribute('data-proposal-vote', 'down');
+            down.setAttribute('data-proposal-id', String(p.id));
+            down.setAttribute('data-item-id', row.id);
+            down.textContent = `👎 ${Math.max(0, Number(p.downvotes || 0) | 0)}`;
+            footer.appendChild(down);
+            line.appendChild(footer);
+            expanded.appendChild(line);
         });
     }
+    if (globalDiscoveriesExpandedId === row.id) expanded.classList.remove('hidden');
+    wrap.appendChild(expanded);
+    return wrap;
+}
+
+function renderGlobalDiscoveriesPage() {
+    if (!globalDiscoveriesListEl) return;
+    const ordered = [...globalDiscoveriesRows].sort(compareGlobalDiscoveriesRows);
     const total = ordered.length;
-    const pageCount = Math.max(1, Math.ceil(total / GLOBAL_DISCOVERIES_PER_PAGE));
-    globalDiscoveriesPage = Math.max(1, Math.min(pageCount, globalDiscoveriesPage));
-    const start = (globalDiscoveriesPage - 1) * GLOBAL_DISCOVERIES_PER_PAGE;
-    const pageRows = ordered.slice(start, start + GLOBAL_DISCOVERIES_PER_PAGE);
     globalDiscoveriesListEl.innerHTML = '';
-    if (!pageRows.length) {
+    if (!ordered.length) {
         const empty = document.createElement('div');
         empty.className = 'px-4 py-6 text-sm text-slate-400 text-center';
         empty.textContent = 'No items found.';
         globalDiscoveriesListEl.appendChild(empty);
-    } else {
-        for (const row of pageRows) {
-            const upvotes = Math.max(0, Number(row.upvotes || 0) | 0);
-            const downvotes = Math.max(0, Number(row.downvotes || 0) | 0);
-            const comboText =
-                row.ingredientAText && row.ingredientBText
-                    ? `${row.ingredientAEmoji || '·'} ${row.ingredientAText} + ${row.ingredientBEmoji || '·'} ${row.ingredientBText}`
-                    : 'Starter item';
-
-            const wrap = document.createElement('div');
-            wrap.className = 'px-4 py-2.5';
-            wrap.setAttribute('data-discovery-item-id', row.id);
-
-            const top = document.createElement('div');
-            top.className = 'flex items-center gap-3';
-            top.setAttribute('data-discovery-expand-toggle', row.id);
-
-            const emojiEl = document.createElement('span');
-            emojiEl.className = 'text-xl leading-none select-none';
-            emojiEl.setAttribute('aria-hidden', 'true');
-            emojiEl.textContent = row.emoji || '·';
-            top.appendChild(emojiEl);
-
-            const textWrap = document.createElement('div');
-            textWrap.className = 'min-w-0 flex-1';
-            const nameEl = document.createElement('div');
-            nameEl.className = 'text-sm text-slate-100 truncate';
-            if (row.nameColor) nameEl.style.color = row.nameColor;
-            nameEl.textContent = row.name;
-            const comboEl = document.createElement('div');
-            comboEl.className = 'text-[11px] text-slate-400 truncate';
-            comboEl.textContent = comboText;
-            const metaEl = document.createElement('div');
-            metaEl.className = 'text-[11px] text-slate-500 truncate';
-            const discoveredBy = row.discoveredByUsername ? row.discoveredByUsername : 'system';
-            const metaParts = [`Discovered by: ${discoveredBy}`];
-            if (row.discoveredAt) metaParts.push(new Date(row.discoveredAt).toLocaleString());
-            if (Number.isFinite(Number(row.iconSizeBytes)) && Number(row.iconSizeBytes) > 0) {
-                metaParts.push(`Icon: ${formatKbValue(row.iconSizeBytes)} KB`);
-            }
-            metaEl.textContent = metaParts.join(' | ');
-            textWrap.appendChild(nameEl);
-            textWrap.appendChild(comboEl);
-            textWrap.appendChild(metaEl);
-            top.appendChild(textWrap);
-
-            const right = document.createElement('div');
-            right.className = 'ml-2 shrink-0 flex items-center gap-1.5';
-            const deleteBtn = document.createElement('button');
-            deleteBtn.type = 'button';
-            deleteBtn.className = 'vote-pill vote-pill--down';
-            deleteBtn.setAttribute('data-discovery-delete-btn', '1');
-            deleteBtn.setAttribute('data-id', row.id);
-            deleteBtn.textContent = 'Delete';
-            right.appendChild(deleteBtn);
-            const upBtn = document.createElement('button');
-            upBtn.type = 'button';
-            upBtn.className = 'vote-pill vote-pill--up';
-            upBtn.setAttribute('data-discovery-vote-btn', '1');
-            upBtn.setAttribute('data-vote', 'up');
-            upBtn.setAttribute('data-id', row.id);
-            upBtn.textContent = `👍 ${upvotes}`;
-            right.appendChild(upBtn);
-
-            const downBtn = document.createElement('button');
-            downBtn.type = 'button';
-            downBtn.className = 'vote-pill vote-pill--down';
-            downBtn.setAttribute('data-discovery-vote-btn', '1');
-            downBtn.setAttribute('data-vote', 'down');
-            downBtn.setAttribute('data-id', row.id);
-            downBtn.textContent = `👎 ${downvotes}`;
-            right.appendChild(downBtn);
-
-            const proposalBtn = document.createElement('button');
-            proposalBtn.type = 'button';
-            proposalBtn.className = 'vote-pill vote-pill--up';
-            proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
-            proposalBtn.setAttribute('data-id', row.id);
-            proposalBtn.textContent = '🗳️ Vote';
-            right.appendChild(proposalBtn);
-            top.appendChild(right);
-            wrap.appendChild(top);
-
-            const expanded = document.createElement('div');
-            expanded.className = 'mt-2 ml-8 border border-slate-700 rounded-lg bg-slate-900/60 p-2 hidden';
-            expanded.setAttribute('data-discovery-expanded', row.id);
-            const props = discoveryProposalsByItem[row.id] || [];
-            if (!props.length) {
-                const none = document.createElement('div');
-                none.className = 'text-xs text-slate-500';
-                none.textContent = 'No active proposals yet. Use Vote... to start one.';
-                expanded.appendChild(none);
-            } else {
-                props.forEach((p) => {
-                    const line = document.createElement('div');
-                    line.className = 'mb-2 last:mb-0 rounded border border-slate-700 bg-slate-950/50 p-2';
-                    const title = document.createElement('div');
-                    title.className = 'text-xs text-slate-200';
-                    title.textContent = p.proposalType === 'name' ? `Name: ${p.proposedName || ''}` : 'Image proposal';
-                    line.appendChild(title);
-                    if (p.proposalType === 'image' && p.proposedImagePath) {
-                        const img = document.createElement('img');
-                        img.className = 'mt-1 w-16 h-16 object-contain rounded border border-slate-600 bg-slate-900';
-                        img.src = proposalImageSrc(p.proposedImagePath);
-                        img.alt = 'Proposed icon';
-                        line.appendChild(img);
-                    }
-                    const footer = document.createElement('div');
-                    footer.className = 'mt-2 flex items-center gap-1.5';
-                    const up = document.createElement('button');
-                    up.type = 'button';
-                    up.className = `vote-pill ${p.myVote === 1 ? 'vote-pill--selected-up' : 'vote-pill--up'}`;
-                    up.setAttribute('data-discovery-proposal-vote-btn', '1');
-                    up.setAttribute('data-proposal-vote', 'up');
-                    up.setAttribute('data-proposal-id', String(p.id));
-                    up.setAttribute('data-item-id', row.id);
-                    up.textContent = `👍 ${Math.max(0, Number(p.upvotes || 0) | 0)}`;
-                    footer.appendChild(up);
-                    const down = document.createElement('button');
-                    down.type = 'button';
-                    down.className = `vote-pill ${p.myVote === -1 ? 'vote-pill--selected-down' : 'vote-pill--down'}`;
-                    down.setAttribute('data-discovery-proposal-vote-btn', '1');
-                    down.setAttribute('data-proposal-vote', 'down');
-                    down.setAttribute('data-proposal-id', String(p.id));
-                    down.setAttribute('data-item-id', row.id);
-                    down.textContent = `👎 ${Math.max(0, Number(p.downvotes || 0) | 0)}`;
-                    footer.appendChild(down);
-                    line.appendChild(footer);
-                    expanded.appendChild(line);
-                });
-            }
-            if (globalDiscoveriesExpandedId === row.id) expanded.classList.remove('hidden');
-            wrap.appendChild(expanded);
-
-            globalDiscoveriesListEl.appendChild(wrap);
-        }
+        if (globalDiscoveriesCountEl) globalDiscoveriesCountEl.textContent = '0 items';
+        if (globalDiscoveriesPageEl) globalDiscoveriesPageEl.textContent = globalDiscoveriesViewMode === 'tree' ? 'Tree view' : 'Page 1 / 1';
+        if (globalDiscoveriesPrevBtn) globalDiscoveriesPrevBtn.disabled = true;
+        if (globalDiscoveriesNextBtn) globalDiscoveriesNextBtn.disabled = true;
+        return;
     }
+
+    if (globalDiscoveriesViewMode === 'tree') {
+        const byId = new Map(ordered.map((row) => [row.id, row]));
+        /** @type {Record<string, string[]>} */
+        const childrenByParent = {};
+        /** @type {string[]} */
+        const rootIds = [];
+        for (const row of ordered) {
+            const parents = [];
+            if (row.ingredientA && row.ingredientA !== row.id && byId.has(row.ingredientA)) parents.push(row.ingredientA);
+            if (row.ingredientB && row.ingredientB !== row.id && byId.has(row.ingredientB) && !parents.includes(row.ingredientB)) {
+                parents.push(row.ingredientB);
+            }
+            let parentId = '';
+            if (parents.length === 2) parentId = parents[0].localeCompare(parents[1]) <= 0 ? parents[0] : parents[1];
+            else if (parents.length === 1) parentId = parents[0];
+            if (parentId) {
+                if (!childrenByParent[parentId]) childrenByParent[parentId] = [];
+                childrenByParent[parentId].push(row.id);
+            } else {
+                rootIds.push(row.id);
+            }
+        }
+
+        const compareIds = (a, b) => compareGlobalDiscoveriesRows(byId.get(a), byId.get(b));
+        rootIds.sort(compareIds);
+        Object.values(childrenByParent).forEach((ids) => ids.sort(compareIds));
+
+        const visited = new Set();
+        const appendNode = (id, depth, stack) => {
+            if (stack.has(id)) return;
+            const row = byId.get(id);
+            if (!row) return;
+            stack.add(id);
+            visited.add(id);
+            globalDiscoveriesListEl.appendChild(buildGlobalDiscoveryRowElement(row, depth));
+            const children = childrenByParent[id] || [];
+            for (const childId of children) appendNode(childId, depth + 1, stack);
+            stack.delete(id);
+        };
+
+        for (const rootId of rootIds) appendNode(rootId, 0, new Set());
+        for (const row of ordered) {
+            if (!visited.has(row.id)) appendNode(row.id, 0, new Set());
+        }
+
+        if (globalDiscoveriesCountEl) globalDiscoveriesCountEl.textContent = `${total} item${total === 1 ? '' : 's'}`;
+        if (globalDiscoveriesPageEl) globalDiscoveriesPageEl.textContent = 'Tree view';
+        if (globalDiscoveriesPrevBtn) globalDiscoveriesPrevBtn.disabled = true;
+        if (globalDiscoveriesNextBtn) globalDiscoveriesNextBtn.disabled = true;
+        return;
+    }
+
+    const pageCount = Math.max(1, Math.ceil(total / GLOBAL_DISCOVERIES_PER_PAGE));
+    globalDiscoveriesPage = Math.max(1, Math.min(pageCount, globalDiscoveriesPage));
+    const start = (globalDiscoveriesPage - 1) * GLOBAL_DISCOVERIES_PER_PAGE;
+    const pageRows = ordered.slice(start, start + GLOBAL_DISCOVERIES_PER_PAGE);
+    pageRows.forEach((row) => globalDiscoveriesListEl.appendChild(buildGlobalDiscoveryRowElement(row, 0)));
+
     if (globalDiscoveriesCountEl) {
         globalDiscoveriesCountEl.textContent = `${total} item${total === 1 ? '' : 's'}`;
     }
@@ -1810,6 +1889,7 @@ const closeGlobalDiscoveriesBtn = document.getElementById('close-global-discover
 const globalDiscoveriesCountEl = document.getElementById('global-discoveries-count');
 const globalDiscoveriesPageEl = document.getElementById('global-discoveries-page');
 const globalDiscoveriesListEl = document.getElementById('global-discoveries-list');
+const globalDiscoveriesViewEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('global-discoveries-view'));
 const globalDiscoveriesSortEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('global-discoveries-sort'));
 const globalDiscoveriesPrevBtn = document.getElementById('global-discoveries-prev');
 const globalDiscoveriesNextBtn = document.getElementById('global-discoveries-next');
@@ -5044,6 +5124,14 @@ if (globalDiscoveriesSortEl) {
     globalDiscoveriesSortEl.value = globalDiscoveriesSort;
     globalDiscoveriesSortEl.addEventListener('change', () => {
         globalDiscoveriesSort = globalDiscoveriesSortEl.value === 'name' ? 'name' : 'datetime';
+        globalDiscoveriesPage = 1;
+        renderGlobalDiscoveriesPage();
+    });
+}
+if (globalDiscoveriesViewEl) {
+    globalDiscoveriesViewEl.value = globalDiscoveriesViewMode;
+    globalDiscoveriesViewEl.addEventListener('change', () => {
+        globalDiscoveriesViewMode = globalDiscoveriesViewEl.value === 'list' ? 'list' : 'tree';
         globalDiscoveriesPage = 1;
         renderGlobalDiscoveriesPage();
     });
