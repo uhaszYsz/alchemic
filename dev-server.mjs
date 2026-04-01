@@ -488,7 +488,8 @@ function parseDiscoveryPropositions(propositions) {
                 if (!rawEmoji) rawEmoji = normalizeSuggestionEmoji(p.label);
             }
         }
-        const name = stripEmojiClusters(rawName).split(/\s+/).filter(Boolean)[0] || '';
+        const words = stripEmojiClusters(rawName).split(/\s+/).filter(Boolean);
+        const name = words.slice(0, 2).join(' ');
         if (!name) continue;
         const key = name.toLowerCase();
         if (seen.has(key)) continue;
@@ -509,7 +510,7 @@ function composeDiscoverySuggestionRequest(input) {
     const userPrompt =
         `Give exactly six name ideas for an element-combining game like Little Alchemy\n\n` +
         `Combine "${itemName1}" and "${itemName2}" with a coherent imaginative style.\n\n` +
-        `Each proposition must be exactly one word: no spaces, no phrases (use compounds or hyphens if needed, e.g. Sunstone or Red-hot).\n\n` +
+        `Use one word when possible; two words are allowed only when necessary. No long phrases. Compounds or hyphenated names are encouraged (e.g. Sunstone or Red-hot).\n\n` +
         `Each proposition must include a fitting emoji.\n\n` +
         `Reply in JSON only (no markdown fences, no text outside the object):\n` +
         `{\n` +
@@ -517,15 +518,15 @@ function composeDiscoverySuggestionRequest(input) {
         `  "propositions": [\n` +
         `    { "name": "Mud", "emoji": "🟤" },\n` +
         `    { "name": "Clay", "emoji": "🧱" },\n` +
-        `    { "name": "Brick", "emoji": "🧱" },\n` +
-        `    { "name": "Loam", "emoji": "🌱" },\n` +
-        `    { "name": "Silt", "emoji": "🌫️" },\n` +
+        `    { "name": "Iron Ingot", "emoji": "⚙️" },\n` +
+        `    { "name": "Stone Axe", "emoji": "🪓" },\n` +
+        `    { "name": "Raft", "emoji": "🛶" },\n` +
         `    { "name": "Peat", "emoji": "🪵" }\n` +
         `  ]\n` +
         `}\n\n` +
-        `propositions must be exactly six distinct entries; each entry must have "name" (single word) and "emoji" (one fitting emoji).`;
+        `propositions must be exactly six distinct entries; each entry must have "name" (1-2 words) and "emoji" (one fitting emoji).`;
     const systemContent =
-        'Reply with a single valid JSON object only. Keys: explanation (string), propositions (array of exactly six objects: { name, emoji }). name must be one word only (no spaces). emoji must be a fitting emoji. No verdict or boolean about validity.';
+        'Reply with a single valid JSON object only. Keys: explanation (string), propositions (array of exactly six objects: { name, emoji }). name must be 1-2 words (prefer one word; no long phrases). emoji must be a fitting emoji. No verdict or boolean about validity.';
     return {
         messages: [
             { role: 'system', content: systemContent },
