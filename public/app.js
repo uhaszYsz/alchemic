@@ -1990,7 +1990,14 @@ function renderFactoryRuntimeStatsModal() {
 }
 
 async function pullFactoryRuntimeStatus() {
-    // Disabled by request: no runtime pull from /api/factory/runtime.
+    // Keep runtime endpoint polling disabled, but fetch fresh runtime on demand
+    // from the main factory state endpoint so stats modal shows server-truth.
+    if (!state.auth.token) return;
+    try {
+        await pullFactoryStateFromServer();
+    } catch {
+        /* ignore transient fetch failures */
+    }
 }
 
 async function startFactoryRunOnServer() {
