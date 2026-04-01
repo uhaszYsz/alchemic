@@ -404,6 +404,9 @@ function factoryRuntimeStatus(state, now = Date.now()) {
 }
 
 function factoryStep(state, userId = 0) {
+    console.log(
+        `[factory-step] ts=${new Date().toISOString()} user=${Number(userId) | 0} loopTick=${(Number(state.loopTick || 0) | 0) + 1}`
+    );
     const out = simulateFactoryStep(state, {
         inBounds: (col, row) => Number.isFinite(col) && Number.isFinite(row),
         getResourceId: (col, row) => factoryCellResourceId(state, col, row),
@@ -446,14 +449,27 @@ function tickAllFactories() {
             continue;
         }
         const stepMs = factoryLoopIntervalMs(st);
-        const lastStepAt = Number(st._serverLastStepAt || 0);
-        if (!lastStepAt || now - lastStepAt < stepMs) continue;
-        st._serverLastStepAt = now;
-        const delta = factoryStep(st, Number(userId) | 0) || {};
-        if (Object.keys(delta).length) {
+        const userNum = Number(userId) | 0;
+        let lastStepAt = Number(st._serverLastStepAt || 0);
+        if (!lastStepAt) {
+            st._serverLastStepAt = now;
+            continue;
+        }
+        let stepsDue = Math.floor((now - lastStepAt) / stepMs);
+        if (stepsDue <= 0) continue;
+        if (stepsDue > 20) stepsDue = 20;
+        const totalDelta = {};
+        for (let i = 0; i < stepsDue; i++) {
+            const delta = factoryStep(st, userNum) || {};
+            for (const [itemId, qty] of Object.entries(delta)) {
+                totalDelta[itemId] = (Number(totalDelta[itemId] || 0) | 0) + (Number(qty) | 0);
+            }
+        }
+        st._serverLastStepAt = lastStepAt + stepsDue * stepMs;
+        if (Object.keys(totalDelta).length) {
             // Persist produced items immediately to DB inventory (server-authoritative).
-            addToUserInventory(db, Number(userId) | 0, delta);
-            addProducedToMinuteStats(st, now, delta);
+            addToUserInventory(db, userNum, totalDelta);
+            addProducedToMinuteStats(st, now, totalDelta);
         }
     }
 }
