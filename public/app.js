@@ -879,6 +879,11 @@ function applyServerInventorySnapshot(raw) {
     renderPlayerInventory();
 }
 
+function isInventoryPanelOpen() {
+    const panel = document.getElementById('inventory-panel');
+    return !!panel && !panel.classList.contains('hidden');
+}
+
 const INVENTORY_GRID_SLOTS = 100;
 
 function renderPlayerInventory() {
@@ -2282,6 +2287,9 @@ function factoryRunSimTick() {
             return result && typeof result.id === 'string' ? result.id : null;
         }
     });
+    if (isInventoryPanelOpen()) {
+        addItemsToPlayerInventory(out && out.invDelta && typeof out.invDelta === 'object' ? out.invDelta : {});
+    }
     const moveLike = [...(out.spawns || []), ...(out.movesTT || []), ...(out.movesToEmptyCombiner || [])];
     for (const mv of moveLike) {
         if (!mv || !mv.from || !mv.to) continue;
@@ -2650,10 +2658,11 @@ async function generateDiscoveryIconPreview(targetPage) {
         });
         const urls = Array.isArray(out && out.images) ? out.images : [];
         if (!urls.length) throw new Error('No image URLs in response');
+        renderDiscoveryAiCandidates(urls);
         discoveryIconSearchPage = page;
         discoveryIconSearchLastCount = urls.length;
         if (discoveryAiImageStatus) {
-            discoveryAiImageStatus.textContent = `Found ${urls.length} images. Search results are hidden; use Custom icon to choose URL/upload.`;
+            discoveryAiImageStatus.textContent = `Found ${urls.length} images. Tap one to select it.`;
         }
     } catch (err) {
         let msg = err && typeof err.message === 'string' ? err.message : String(err);
