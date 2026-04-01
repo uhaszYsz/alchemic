@@ -406,7 +406,6 @@ function factoryStep(state) {
     for (const [k, v] of Object.entries(state.cellItems || {})) {
         if (typeof v === 'string' && v) work[k] = v;
     }
-    const combinerFeeds = [];
     const combinerInputs = {};
     for (const [key, p] of Object.entries(state.placements || {})) {
         if (p !== 'extractor') continue;
@@ -442,17 +441,28 @@ function factoryStep(state) {
             work[dest] = itemId;
             delete work[key];
         } else if (destPl === 'combiner') {
+            if (state.combinerDiscovery && state.combinerDiscovery[dest]) continue;
+            const existing = work[dest];
+            if (!existing) {
+                // First input can wait inside combiner until a matching second input arrives.
+                work[dest] = itemId;
+                delete work[key];
+                continue;
+            }
+            if (existing === itemId) continue;
             if (!combinerInputs[dest]) combinerInputs[dest] = [];
             combinerInputs[dest].push({ from: key, itemId });
-            combinerFeeds.push({ from: key, to: dest, itemId });
         }
     }
     for (const k of Object.keys(combinerInputs)) {
         const arr = combinerInputs[k];
-        if (!arr || arr.length < 2) continue;
+        if (!arr || arr.length < 1) continue;
         arr.sort((a, b) => a.from.localeCompare(b.from));
-        const a = arr[0].itemId;
-        const b = arr[1].itemId;
+        const existing = work[k];
+        const incoming = arr[0];
+        if (!existing || !incoming || !incoming.itemId) continue;
+        const a = existing;
+        const b = incoming.itemId;
         const key = [a, b].sort().join('+');
         const resultId = recipeIndex[key];
         if (!resultId) {
@@ -468,9 +478,8 @@ function factoryStep(state) {
         if (work[outKey]) continue;
         work[outKey] = resultId;
         console.log(`[factory-combine] combiner=${k} a=${a} b=${b} result=${resultId}`);
-        for (const input of arr.slice(0, 2)) {
-            delete work[input.from];
-        }
+        delete work[k];
+        delete work[incoming.from];
     }
     state.cellItems = work;
     state.loopTick = (Number(state.loopTick || 0) | 0) + 1;
@@ -482,20 +491,12 @@ function tickAllFactories() {
     for (const [userId, st] of factoryStateByUser.entries()) {
         const runUntil = Number(st._factoryRunUntilAt || 0);
         if (!runUntil || runUntil <= 0) continue;
-        const dbgLast = Number(st._factoryDebugLastLogAt || 0);
-        if (!dbgLast || now - dbgLast >= 5000) {
-            st._factoryDebugLastLogAt = now;
-            console.log(
-                `[factory-run-alive] user=${Number(userId) | 0} remainingMs=${Math.max(0, runUntil - now)} placements=${Object.keys(
-                    st.placements || {}
-                ).length}`
-            );
-        }
         if (now >= runUntil) {
             if (!st._factoryRunStoppedAtIso) {
                 st._factoryRunStoppedAtIso = new Date(now).toISOString();
                 st._factoryLastProducedPerMinute = st._factoryCurrentProducedPerMinute || {};
             }
+            console.log(`[factory-run-ended] user=${Number(userId) | 0}`);
             st._factoryRunUntilAt = 0;
             st._factoryRunStartedAt = 0;
             persistFactoryState(userId, st);
@@ -523,37 +524,10 @@ function tickAllFactories() {
             }
             guard++;
         }
-        if (!st._factoryDebugProducedTotal || typeof st._factoryDebugProducedTotal !== 'object') {
-            st._factoryDebugProducedTotal = {};
-        }
         if (Object.keys(totalDelta).length) {
             // Persist produced items immediately to DB inventory (server-authoritative).
             addToUserInventory(db, Number(userId) | 0, totalDelta);
             addProducedToMinuteStats(st, now, totalDelta);
-            for (const [itemId, qty] of Object.entries(totalDelta)) {
-                const n = Number(qty) | 0;
-                if (!itemId || n <= 0) continue;
-                st._factoryDebugProducedTotal[itemId] = (Number(st._factoryDebugProducedTotal[itemId] || 0) | 0) + n;
-            }
-        }
-        const dbgStatsLast = Number(st._factoryDebugStatsLastLogAt || 0);
-        if (!dbgStatsLast || now - dbgStatsLast >= 5000) {
-            st._factoryDebugStatsLastLogAt = now;
-            let extractors = 0;
-            let transporters = 0;
-            let combiners = 0;
-            let storages = 0;
-            for (const p of Object.values(st.placements || {})) {
-                if (p === 'extractor') extractors++;
-                else if (p === 'transporter') transporters++;
-                else if (p === 'combiner') combiners++;
-                else if (p === 'storage') storages++;
-            }
-            console.log(
-                `[factory-debug] user=${Number(userId) | 0} extractors=${extractors} transporters=${transporters} combiners=${combiners} storages=${storages} carried=${Object.keys(
-                    st.cellItems || {}
-                ).length} produced=${JSON.stringify(st._factoryDebugProducedTotal || {})}`
-            );
         }
     }
 }
@@ -1294,7 +1268,6 @@ const server = http.createServer((req, res) => {
             granted = pending;
             st._factoryPendingProduced = {};
             persistFactoryState(auth.userId, st);
-            console.log(`[inventory-open grant] user=${auth.userId} granted=${JSON.stringify(granted)}`);
         }
         sendJson(
             res,
@@ -1370,11 +1343,7 @@ const server = http.createServer((req, res) => {
                         ? { ...prev._factoryLastProducedPerMinute }
                         : {};
                 activateFactoryRunWindow(st, Date.now());
-                console.log(
-                    `[factory-run-start] user=${auth.userId} placements=${Object.keys(st.placements || {}).length} transporters=${Object.keys(
-                        st.transporterDirs || {}
-                    ).length} combiners=${Object.keys(st.combinerDirs || {}).length} loopMs=${factoryLoopIntervalMs(st)}`
-                );
+                console.log(`[factory-run-started] user=${auth.userId}`);
                 factoryStateByUser.set(auth.userId, st);
                 persistFactoryState(auth.userId, st);
                 sendJson(

@@ -4846,10 +4846,6 @@ if (toggleInventoryBtn && inventoryPanelEl) {
                     const payload = await r.json();
                     if (payload && payload.inventory) applyServerInventorySnapshot(payload.inventory);
                     if (payload && payload.runtime) applyFactoryRuntime(payload.runtime);
-                    const granted = payload && typeof payload === 'object' ? payload.granted : null;
-                    if (granted && typeof granted === 'object' && Object.keys(granted).length > 0) {
-                        console.log('[inventory-open granted]', granted);
-                    }
                 })
                 .catch(() => {});
         }
