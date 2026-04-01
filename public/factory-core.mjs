@@ -221,7 +221,7 @@ export function simulateFactoryStep(state, deps) {
         const destPl = state.placements[destKey];
         if (destPl === 'storage') {
             deposits.push({ from: key, to: destKey, itemId });
-        } else if (destPl === 'transporter' || destPl === 'sorter') {
+        } else if (destPl === 'transporter' || destPl === 'sorter' || destPl === 'bridge') {
             movesTTCandidates.push({ from: key, to: destKey, itemId });
         } else if (destPl === 'combiner') {
             if (state.combinerDiscovery && state.combinerDiscovery[destKey]) continue;
@@ -384,7 +384,13 @@ export function simulateFactoryStep(state, deps) {
             const nb = factoryNeighborColRow(c.col, c.row, getCombinerDir(f.to));
             if (!inBounds(nb.col, nb.row)) continue;
             const outKey = factoryPlacementKey(nb.col, nb.row);
-            if (state.placements[outKey] !== 'transporter' && state.placements[outKey] !== 'sorter') continue;
+            if (
+                state.placements[outKey] !== 'transporter' &&
+                state.placements[outKey] !== 'sorter' &&
+                state.placements[outKey] !== 'bridge'
+            ) {
+                continue;
+            }
             if (work[outKey]) continue;
             if (claimedDest.has(outKey) || combinerOutClaimed.has(outKey)) continue;
             combinerDestClaimed.add(f.to);
