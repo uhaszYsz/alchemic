@@ -24,9 +24,7 @@ import {
     getUserById,
     upsertSession,
     getSessionByTokenHash,
-    deleteSessionByTokenHash,
-    saveUserFactoryState,
-    loadUserFactoryState
+    deleteSessionByTokenHash
 } from './db.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -356,16 +354,7 @@ function getOrInitFactoryState(userId) {
     const uid = Number(userId);
     const fromMem = factoryStateByUser.get(uid);
     if (fromMem) return fromMem;
-    let st = null;
-    const json = loadUserFactoryState(db, uid);
-    if (json) {
-        try {
-            st = sanitizeFactoryState(JSON.parse(json));
-        } catch {
-            st = null;
-        }
-    }
-    if (!st) st = defaultFactoryState();
+    const st = defaultFactoryState();
     factoryStateByUser.set(uid, st);
     return st;
 }
@@ -1042,7 +1031,6 @@ const server = http.createServer((req, res) => {
                 }
                 const st = sanitizeFactoryState(body.factory);
                 factoryStateByUser.set(auth.userId, st);
-                saveUserFactoryState(db, auth.userId, JSON.stringify(factoryClientSnapshot(st)));
                 sendJson(res, 200, { ok: true }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));

@@ -76,7 +76,6 @@ const state = {
     auth: {
         token: '',
         username: '',
-        factorySyncTimerId: null,
         enteringFactory: false
     },
     /** comboKey -> true; user cancelled naming earlier */
@@ -1715,37 +1714,41 @@ function buildFactoryPayload() {
     };
 }
 
+let factoryStateSyncInFlight = false;
+let factoryStateSyncQueued = false;
+
+async function flushFactoryStateToServer() {
+    if (!state.auth.token) return;
+    if (factoryStateSyncInFlight) {
+        factoryStateSyncQueued = true;
+        return;
+    }
+    factoryStateSyncInFlight = true;
+    try {
+        do {
+            factoryStateSyncQueued = false;
+            await apiFetch('/api/factory/state', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ factory: buildFactoryPayload() })
+            });
+        } while (factoryStateSyncQueued);
+    } catch {
+        /* ignore transient network failures */
+    } finally {
+        factoryStateSyncInFlight = false;
+    }
+}
+
+function notifyFactoryStateMutated() {
+    void flushFactoryStateToServer();
+}
+
 async function pullFactoryStateFromServer() {
     const r = await apiFetch('/api/factory/state');
     if (!r.ok) throw new Error(await r.text());
     const payload = await r.json();
     normalizeFactoryFromServer(payload && payload.factory ? payload.factory : null);
-}
-
-async function pushFactoryStateToServer() {
-    if (!state.auth.token) return;
-    try {
-        await apiFetch('/api/factory/state', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ factory: buildFactoryPayload() })
-        });
-    } catch {
-        /* ignore transient network failures */
-    }
-}
-
-function startFactoryPushLoop() {
-    if (state.auth.factorySyncTimerId != null) return;
-    state.auth.factorySyncTimerId = setInterval(() => {
-        void pushFactoryStateToServer();
-    }, 3000);
-}
-
-function stopFactoryPushLoop() {
-    if (state.auth.factorySyncTimerId == null) return;
-    clearInterval(state.auth.factorySyncTimerId);
-    state.auth.factorySyncTimerId = null;
 }
 
 async function runAuthRequest(path) {
@@ -1952,6 +1955,7 @@ function factoryRunSimTick() {
 
     combinerFeeds.sort((a, b) => a.from.localeCompare(b.from));
     const combinerDestClaimed = new Set();
+    const combinerOutClaimed = new Set();
     for (const f of combinerFeeds) {
         if (!work[f.from] || work[f.from] !== f.incoming) continue;
         if (combinerDestClaimed.has(f.to)) continue;
@@ -1959,56 +1963,43 @@ function factoryRunSimTick() {
         const existing = work[f.to];
         if (!existing || existing === f.incoming) continue;
         if (state.factory.combinerDiscovery[f.to]) continue;
-        combinerDestClaimed.add(f.to);
-        fromClaimed.add(f.from);
-        delete work[f.from];
         const comboKey = [existing, f.incoming].sort().join('+');
         const result = state.recipes[comboKey];
-        delete work[f.to];
-        delete state.factory.itemSlides[f.to];
-        delete state.factory.itemSlides[f.from];
         if (result && typeof result.id === 'string') {
-            work[f.to] = result.id;
-            factoryRecordItemSlide(f.to, f.from, slideDur, slideT);
+            const parts = f.to.split(',');
+            const c = Number(parts[0]);
+            const r = Number(parts[1]);
+            if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+            const cdir = factoryCombinerDir(f.to);
+            const nb = factoryNeighborColRow(c, r, cdir);
+            if (!factoryInBounds(nb.col, nb.row)) continue;
+            const outKey = factoryPlacementKey(nb.col, nb.row);
+            if (state.factory.placements[outKey] !== 'transporter') continue;
+            if (work[outKey]) continue;
+            if (destClaimed.has(outKey) || combinerOutClaimed.has(outKey)) continue;
+            combinerDestClaimed.add(f.to);
+            fromClaimed.add(f.from);
+            destClaimed.add(outKey);
+            combinerOutClaimed.add(outKey);
+            delete work[f.from];
+            delete work[f.to];
+            delete state.factory.itemSlides[f.to];
+            delete state.factory.itemSlides[f.from];
+            work[outKey] = result.id;
+            factoryRecordItemSlide(outKey, f.to, slideDur, slideT);
         } else {
+            combinerDestClaimed.add(f.to);
+            fromClaimed.add(f.from);
+            delete work[f.from];
+            delete work[f.to];
+            delete state.factory.itemSlides[f.to];
+            delete state.factory.itemSlides[f.from];
             state.factory.combinerDiscovery[f.to] = {
                 a: existing,
                 b: f.incoming,
                 comboKey
             };
         }
-    }
-
-    /** @type {{ from: string, to: string, id: string }[]} */
-    const ejects = [];
-    for (const [key, p] of Object.entries(state.factory.placements)) {
-        if (p !== 'combiner') continue;
-        if (state.factory.combinerDiscovery[key]) continue;
-        const outId = work[key];
-        if (!outId) continue;
-        const parts = key.split(',');
-        const c = Number(parts[0]);
-        const r = Number(parts[1]);
-        if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
-        const cdir = factoryCombinerDir(key);
-        const nb = factoryNeighborColRow(c, r, cdir);
-        if (!factoryInBounds(nb.col, nb.row)) continue;
-        const nk = factoryPlacementKey(nb.col, nb.row);
-        if (state.factory.placements[nk] !== 'transporter') continue;
-        if (work[nk]) continue;
-        ejects.push({ from: key, to: nk, id: outId });
-    }
-    ejects.sort((a, b) => a.from.localeCompare(b.from));
-    const ejDest = new Set();
-    const ejFrom = new Set();
-    for (const e of ejects) {
-        if (ejDest.has(e.to) || ejFrom.has(e.from)) continue;
-        if (work[e.to]) continue;
-        ejDest.add(e.to);
-        ejFrom.add(e.from);
-        delete work[e.from];
-        work[e.to] = e.id;
-        factoryRecordItemSlide(e.to, e.from, slideDur, slideT);
     }
 
     /** @type {typeof state.factory.cellItems} */
@@ -2404,6 +2395,7 @@ function placeDiscoveryResultForPending(pending, id, emoji, name) {
     } else {
         delete state.factory.combinerDiscovery[factoryCombKey];
         state.factory.cellItems[factoryCombKey] = id;
+        notifyFactoryStateMutated();
     }
     pending.resultPlaced = true;
 }
@@ -3092,6 +3084,7 @@ function openFactoryCombinerDiscovery(combinerKey, aId, bId, comboKey) {
                 state.factory.cellRejectFlashUntil[combinerKey] = performance.now() + 1000;
                 delete state.factory.combinerDiscovery[combinerKey];
                 renderFactoryGrid();
+                notifyFactoryStateMutated();
                 return;
             }
             if (out.exists && out.item) {
@@ -3121,6 +3114,7 @@ function openFactoryCombinerDiscovery(combinerKey, aId, bId, comboKey) {
                 renderLibrary();
                 delete state.factory.combinerDiscovery[combinerKey];
                 renderFactoryGrid();
+                notifyFactoryStateMutated();
                 return;
             }
             const a = factoryLibraryStubForId(aId);
@@ -3159,6 +3153,7 @@ function openFactoryCombinerDiscovery(combinerKey, aId, bId, comboKey) {
             state.factory.cellRejectFlashUntil[combinerKey] = performance.now() + 1000;
             delete state.factory.combinerDiscovery[combinerKey];
             renderFactoryGrid();
+            notifyFactoryStateMutated();
         });
 }
 
@@ -3354,6 +3349,7 @@ function factoryApplyBeltPath(filtered, dirs) {
         delete state.factory.combinerDirs[key];
     }
     renderFactoryGrid();
+    notifyFactoryStateMutated();
 }
 
 /**
@@ -3795,6 +3791,7 @@ function factoryHandleCellAction(col, row, shiftKey) {
         delete state.factory.combinerDiscovery[key];
         delete state.factory.cellItems[key];
         factoryClearSlidesTouchingKey(key);
+        notifyFactoryStateMutated();
         return;
     }
     const placement = state.factory.placements[key];
@@ -3808,11 +3805,13 @@ function factoryHandleCellAction(col, row, shiftKey) {
 
     if (placement === 'transporter' && (!sel || sel === 'transporter')) {
         state.factory.transporterDirs[key] = (factoryTransporterDir(key) + 1) % 4;
+        notifyFactoryStateMutated();
         return;
     }
 
     if (placement === 'combiner' && (!sel || sel === 'combiner')) {
         state.factory.combinerDirs[key] = (factoryCombinerDir(key) + 1) % 4;
+        notifyFactoryStateMutated();
         return;
     }
 
@@ -3840,6 +3839,7 @@ function factoryHandleCellAction(col, row, shiftKey) {
         delete state.factory.transporterDirs[key];
         delete state.factory.combinerDirs[key];
     }
+    notifyFactoryStateMutated();
 }
 
 function updateFactoryBuildButtons() {
@@ -3905,16 +3905,12 @@ function setWorkspace(which) {
                     state.auth.enteringFactory = false;
                     renderFactoryGrid();
                     startFactoryLoop();
-                    startFactoryPushLoop();
                 });
         } else {
             renderFactoryGrid();
             startFactoryLoop();
-            startFactoryPushLoop();
         }
     } else {
-        void pushFactoryStateToServer();
-        stopFactoryPushLoop();
         stopFactoryLoop();
         factoryStopRenderLoop();
         factoryClearBeltLineState();
@@ -4332,6 +4328,7 @@ if (rejectDiscoveryBtn) {
                     state.factory.cellRejectFlashUntil[ck] = performance.now() + 1000;
                     delete state.factory.combinerDiscovery[ck];
                     renderFactoryGrid();
+                    notifyFactoryStateMutated();
                 }
             }
         } finally {
@@ -5007,6 +5004,7 @@ if (factoryClearBuildingsBtn) {
         state.factory.cellRejectFlashUntil = {};
         factoryClearBeltLineState();
         renderFactoryGrid();
+        notifyFactoryStateMutated();
     });
 }
 
@@ -5018,6 +5016,7 @@ if (factoryUpgradeSizeBtn) {
         state.factory.cameraX += 1;
         state.factory.cameraY += 1;
         renderFactoryGrid();
+        notifyFactoryStateMutated();
     });
 }
 
@@ -5028,6 +5027,7 @@ if (factoryUpgradeSpeedBtn) {
         state.factory.loopMs = Math.max(MIN_FACTORY_LOOP_MS, Math.round(cur * 0.9));
         restartFactoryLoop();
         updateFactoryUpgradeBar();
+        notifyFactoryStateMutated();
     });
 }
 
@@ -5061,7 +5061,6 @@ if (authLogoutBtn) {
         updateFloatingDiscoveryAlert(false);
         applyLoggedInUi();
         storeSessionToken('');
-        stopFactoryPushLoop();
         void fetch(`${apiOrigin()}/api/auth/logout`, {
             method: 'POST',
             headers: oldToken ? { Authorization: `Bearer ${oldToken}` } : {}
@@ -5069,16 +5068,6 @@ if (authLogoutBtn) {
         setAuthVisible(true);
     });
 }
-
-window.addEventListener('beforeunload', () => {
-    if (!state.auth.token) return;
-    void fetch(`${apiOrigin()}/api/factory/state`, {
-        method: 'POST',
-        keepalive: true,
-        headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ factory: buildFactoryPayload() })
-    }).catch(() => {});
-});
 
 function handleTouchStartFromLibrary(e, item) {
     const ghost = document.createElement('div');
