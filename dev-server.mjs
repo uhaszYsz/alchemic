@@ -9,7 +9,12 @@ import {
     recordRejectedCraft,
     isRejectedCraft,
     upsertItem,
+    findItemByName,
     setItemIconPath,
+    voteOnItem,
+    createDiscoveryProposal,
+    listDiscoveryProposalsByItem,
+    voteOnDiscoveryProposal,
     createUser,
     getUserByUsername,
     getUserById,
@@ -388,13 +393,65 @@ async function ensureImagesDir() {
     await fs.promises.mkdir(imagesRoot, { recursive: true });
 }
 
-const MAX_USER_ICON_BYTES = 16 * 1024;
+const MAX_USER_ICON_PNG_JPG_BYTES = 20 * 1024;
+const MAX_USER_ICON_GIF_BYTES = 120 * 1024;
 function imageExtFromBuffer(buf) {
     if (!buf || buf.length < 4) return null;
     if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
     if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
     if (buf.length >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return '.gif';
     return null;
+}
+
+function decodeDataUrlToBuffer(dataUrl) {
+    const raw = String(dataUrl || '').trim();
+    const m = raw.match(/^data:([^;,]+)?;base64,([a-zA-Z0-9+/=]+)$/);
+    if (!m) return null;
+    try {
+        return Buffer.from(m[2], 'base64');
+    } catch {
+        return null;
+    }
+}
+
+function validateStrictUserIconBytes(buf, ext) {
+    if (!buf || !ext) return 'Image must be JPEG, PNG, or GIF.';
+    if (ext === '.gif') {
+        if (buf.length > MAX_USER_ICON_GIF_BYTES) {
+            return `GIF must be ${MAX_USER_ICON_GIF_BYTES} bytes or smaller.`;
+        }
+        return null;
+    }
+    if (ext === '.png' || ext === '.jpg') {
+        if (buf.length >= MAX_USER_ICON_PNG_JPG_BYTES) {
+            return `PNG/JPG must be smaller than ${MAX_USER_ICON_PNG_JPG_BYTES} bytes.`;
+        }
+        return null;
+    }
+    return 'Image must be JPEG, PNG, or GIF.';
+}
+
+function isStrictHttpUrl(input) {
+    try {
+        const u = new URL(String(input || '').trim());
+        return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+async function fetchIconBufferFromUrlOrData(imageUrl, imageDataUrl) {
+    const dataUrl = String(imageDataUrl || '').trim();
+    if (dataUrl) {
+        const buf = decodeDataUrlToBuffer(dataUrl);
+        if (!buf) throw new Error('Invalid imageDataUrl payload.');
+        return buf;
+    }
+    const remote = String(imageUrl || '').trim();
+    if (!remote || !isStrictHttpUrl(remote)) throw new Error('Use a valid http/https image URL.');
+    const r = await fetch(remote);
+    if (!r.ok) throw new Error(`Failed to fetch image: ${r.status}`);
+    return Buffer.from(await r.arrayBuffer());
 }
 
 async function proxyOpenAI(req, res, target) {
@@ -774,21 +831,130 @@ const server = http.createServer((req, res) => {
                 const id = typeof body.id === 'string' ? body.id.trim() : '';
                 const emoji = typeof body.emoji === 'string' ? body.emoji : '';
                 const name = typeof body.name === 'string' ? body.name.trim() : '';
+                const name_color =
+                    typeof body.name_color === 'string' && /^#[0-9a-fA-F]{6}$/.test(body.name_color.trim())
+                        ? body.name_color.trim().toLowerCase()
+                        : '';
                 const ingredient_a = typeof body.ingredient_a === 'string' ? body.ingredient_a.trim() : '';
                 const ingredient_b = typeof body.ingredient_b === 'string' ? body.ingredient_b.trim() : '';
                 if (!id || !name) return send(res, 400, 'id and name required', CORS_API);
-                upsertItem(db, {
-                    id,
-                    emoji: emoji || '✨',
-                    name,
-                    ingredient_a: ingredient_a || '',
-                    ingredient_b: ingredient_b || '',
-                    discovered_by: auth.userId,
-                    discovered_at: new Date().toISOString()
-                });
+                const existing = findItemByName(db, name);
+                if (existing && String(existing.id) !== id) {
+                    return send(res, 409, 'item name already exists', CORS_API);
+                }
+                try {
+                    upsertItem(db, {
+                        id,
+                        emoji: emoji || '✨',
+                        name,
+                        name_color,
+                        ingredient_a: ingredient_a || '',
+                        ingredient_b: ingredient_b || '',
+                        discovered_by: auth.userId,
+                        discovered_at: new Date().toISOString()
+                    });
+                } catch (err) {
+                    const msg = String(err && err.message ? err.message : err);
+                    if (/unique constraint failed:\s*items\.name/i.test(msg)) {
+                        return send(res, 409, 'item name already exists', CORS_API);
+                    }
+                    throw err;
+                }
                 recipeIndex = buildRecipeIndex(getItemsMap(db));
                 res.writeHead(204, CORS_API);
                 res.end();
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/items/vote') {
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const id = typeof body.id === 'string' ? body.id.trim() : '';
+                const vote = body.vote === 'down' ? 'down' : body.vote === 'up' ? 'up' : '';
+                if (!id || !vote) return send(res, 400, 'id and vote required', CORS_API);
+                const out = voteOnItem(db, id, vote);
+                if (!out) return send(res, 409, 'Voting allowed only for discoveries from last 5 days.', CORS_API);
+                sendJson(res, 200, { ok: true, id, upvotes: out.upvotes, downvotes: out.downvotes }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'GET' && pathOnly === '/api/discovery-proposals') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        const u = new URL(req.url, 'http://localhost');
+        const itemId = String(u.searchParams.get('itemId') || '').trim();
+        if (!itemId) return send(res, 400, 'itemId required', CORS_API);
+        const proposals = listDiscoveryProposalsByItem(db, itemId, auth.userId);
+        return sendJson(res, 200, { itemId, proposals }, CORS_API);
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/discovery-proposals') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then(async (raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const itemId = typeof body.itemId === 'string' ? body.itemId.trim() : '';
+                const proposalType =
+                    body.proposalType === 'name' ? 'name' : body.proposalType === 'image' ? 'image' : '';
+                if (!itemId || !proposalType) return send(res, 400, 'itemId and proposalType required', CORS_API);
+                if (proposalType === 'name') {
+                    const proposedName = typeof body.proposedName === 'string' ? body.proposedName.trim() : '';
+                    if (!proposedName) return send(res, 400, 'proposedName required', CORS_API);
+                    const out = createDiscoveryProposal(db, {
+                        itemId,
+                        proposalType: 'name',
+                        proposedName,
+                        createdBy: auth.userId
+                    });
+                    if (!out) return send(res, 409, 'Only recent discoveries (<= 5 days) can start votes.', CORS_API);
+                    return sendJson(res, 200, { ok: true, proposalId: out.id }, CORS_API);
+                }
+                const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
+                const imageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl.trim() : '';
+                await ensureImagesDir();
+                const buf = await fetchIconBufferFromUrlOrData(imageUrl, imageDataUrl);
+                const ext = imageExtFromBuffer(buf);
+                if (!ext) return send(res, 400, 'Image must be JPEG, PNG, or GIF.', CORS_API);
+                const strictErr = validateStrictUserIconBytes(buf, ext);
+                if (strictErr) return send(res, 413, strictErr, CORS_API);
+                const safeItem = itemId.replace(/[^a-zA-Z0-9_-]/g, '_') || 'item';
+                const rel = `images/proposals/${safeItem}_${Date.now()}_${Math.floor(Math.random() * 1e6)}${ext}`;
+                await fs.promises.mkdir(path.dirname(path.join(__dirname, rel)), { recursive: true });
+                await fs.promises.writeFile(path.join(__dirname, rel), buf);
+                const out = createDiscoveryProposal(db, {
+                    itemId,
+                    proposalType: 'image',
+                    proposedImagePath: rel,
+                    createdBy: auth.userId
+                });
+                if (!out) return send(res, 409, 'Only recent discoveries (<= 5 days) can start votes.', CORS_API);
+                return sendJson(res, 200, { ok: true, proposalId: out.id, proposedImagePath: rel }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/discovery-proposals/vote') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const proposalId = Number(body.proposalId || 0) | 0;
+                const vote = body.vote === 'down' ? 'down' : body.vote === 'up' ? 'up' : '';
+                if (!proposalId || !vote) return send(res, 400, 'proposalId and vote required', CORS_API);
+                const out = voteOnDiscoveryProposal(db, proposalId, auth.userId, vote);
+                if (!out) return send(res, 409, 'Voting unavailable for this proposal.', CORS_API);
+                sendJson(res, 200, { ok: true, proposalId, ...out }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;
@@ -801,29 +967,30 @@ const server = http.createServer((req, res) => {
                 if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
                 const id = typeof body.id === 'string' ? body.id.trim() : '';
                 const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
+                const imageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl.trim() : '';
                 const strictUserUrl = body.strictUserUrl === true;
-                if (!id || !imageUrl) return send(res, 400, 'id and imageUrl required', CORS_API);
+                if (!id || (!imageUrl && !imageDataUrl)) {
+                    return send(res, 400, 'id and imageUrl/imageDataUrl required', CORS_API);
+                }
                 await ensureImagesDir();
                 const safe = id.replace(/[^a-zA-Z0-9_-]/g, '_') || 'item';
-                const r = await fetch(imageUrl);
-                if (!r.ok) return send(res, 502, `Failed to fetch image: ${r.status}`, CORS_API);
-                const buf = Buffer.from(await r.arrayBuffer());
-                let rel;
-                if (strictUserUrl) {
-                    if (buf.length > MAX_USER_ICON_BYTES) {
-                        return send(
-                            res,
-                            413,
-                            `Image must be ${MAX_USER_ICON_BYTES} bytes or smaller (JPEG, PNG, or GIF).`,
-                            CORS_API
-                        );
-                    }
-                    const ext = imageExtFromBuffer(buf);
-                    if (!ext) return send(res, 400, 'Image must be JPEG, PNG, or GIF.', CORS_API);
-                    rel = `images/${safe}${ext}`;
+                /** @type {Buffer | null} */
+                let buf = null;
+                if (imageDataUrl) {
+                    buf = decodeDataUrlToBuffer(imageDataUrl);
+                    if (!buf) return send(res, 400, 'Invalid imageDataUrl payload.', CORS_API);
                 } else {
-                    rel = `images/${safe}.png`;
+                    const r = await fetch(imageUrl);
+                    if (!r.ok) return send(res, 502, `Failed to fetch image: ${r.status}`, CORS_API);
+                    buf = Buffer.from(await r.arrayBuffer());
                 }
+                const ext = imageExtFromBuffer(buf);
+                if (!ext) return send(res, 400, 'Image must be JPEG, PNG, or GIF.', CORS_API);
+                if (strictUserUrl) {
+                    const err = validateStrictUserIconBytes(buf, ext);
+                    if (err) return send(res, 413, err, CORS_API);
+                }
+                const rel = `images/${safe}${ext}`;
                 await fs.promises.writeFile(path.join(__dirname, rel), buf);
                 setItemIconPath(db, id, rel);
                 sendJson(res, 200, { ok: true, iconPath: rel }, CORS_API);

@@ -14,10 +14,13 @@ const state = {
     activeElements: [],
     draggedItem: null,
     pendingCombination: null,
+    pendingDiscoveryNotice: null,
     /** @type {{ name: string, emoji: string }[]} last AI suggestions (emoji + name) */
     aiSuggestions: [],
     /** Chosen discovery name (must be one of aiSuggestions); no free typing */
     discoverySelectedName: '',
+    /** Hex color for discovery name label (optional, e.g. #f87171) */
+    discoveryNameColor: '',
     /** 'lab' | 'factory' */
     activeWorkspace: 'lab',
     /** Crafted / factory output counts; separate from the discovery library. */
@@ -80,10 +83,20 @@ const state = {
 /** Base catalog from DB (merged with live combo index for tier calculation). */
 let cachedBaseItemsMap = null;
 const GLOBAL_DISCOVERIES_PER_PAGE = 50;
-/** @type {{ id: string, emoji: string, name: string, discoveredAt?: string }[]} */
+/** @type {{ id: string, emoji: string, name: string, nameColor?: string, discoveredAt?: string, ingredientA?: string, ingredientB?: string, ingredientAText?: string, ingredientBText?: string, upvotes?: number, downvotes?: number }[]} */
 let globalDiscoveriesRows = [];
 let globalDiscoveriesPage = 1;
 let globalDiscoveriesSort = 'datetime';
+let globalDiscoveriesExpandedId = '';
+/** @type {Record<string, { id: number, itemId: string, proposalType: 'name'|'image', proposedName?: string, proposedImagePath?: string, createdBy: number, createdAt: string, upvotes: number, downvotes: number, myVote: number }[]>} */
+let discoveryProposalsByItem = {};
+let discoveryProposalTargetItemId = '';
+const DISCOVERY_NAME_COLOR_CHOICES = [
+    '#f8fafc', '#e2e8f0', '#94a3b8', '#f87171', '#fb7185',
+    '#f97316', '#f59e0b', '#facc15', '#a3e635', '#4ade80',
+    '#34d399', '#2dd4bf', '#22d3ee', '#38bdf8', '#60a5fa',
+    '#818cf8', '#a78bfa', '#c084fc', '#e879f9', '#f472b6'
+];
 
 /** @returns {{ id: string, emoji: string, name: string } | null} */
 function normalizeRecipeResult(val) {
@@ -165,7 +178,7 @@ async function fetchImageGenerations(body) {
 
 /**
  * Sync discovered item to SQLite (dev-server). Safe no-op on failure.
- * @param {{ id: string, emoji: string, name: string, ingredient_a: string, ingredient_b: string }} payload
+ * @param {{ id: string, emoji: string, name: string, name_color?: string, ingredient_a: string, ingredient_b: string }} payload
  */
 async function postItemUpsertRemote(payload) {
     try {
@@ -186,11 +199,15 @@ async function postItemUpsertRemote(payload) {
  * Download image to server `images/` and set `icon_path` in DB.
  * @param {string} id
  * @param {string} imageUrl
- * @param {{ strictUserUrl?: boolean }} [opts] If strictUserUrl, server accepts only JPEG/PNG/GIF and ≤16 KB.
+ * @param {{ strictUserUrl?: boolean, imageDataUrl?: string }} [opts] If strictUserUrl, server enforces user size/type limits.
  * @returns {Promise<{ iconPath: string }>}
  */
 async function postSaveItemIconRemote(id, imageUrl, opts) {
-    const payload = { id, imageUrl };
+    const payload = { id };
+    if (typeof imageUrl === 'string' && imageUrl.trim()) payload.imageUrl = imageUrl.trim();
+    if (opts && typeof opts.imageDataUrl === 'string' && opts.imageDataUrl.trim()) {
+        payload.imageDataUrl = opts.imageDataUrl.trim();
+    }
     if (opts && opts.strictUserUrl) payload.strictUserUrl = true;
     const r = await apiFetch('/api/items/icon', {
         method: 'POST',
@@ -219,6 +236,26 @@ async function postRejectedCraftRemote(itemAId, itemBId) {
         }
     } catch (e) {
         console.warn('postRejectedCraftRemote', e);
+    }
+}
+
+/**
+ * Check whether a combo pair is globally marked as rejected.
+ * @param {string} itemAId
+ * @param {string} itemBId
+ * @returns {Promise<boolean>}
+ */
+async function isRejectedCraftRemote(itemAId, itemBId) {
+    try {
+        const u = new URL(`${apiOrigin()}/api/rejected-crafts/check`);
+        u.searchParams.set('a', String(itemAId || ''));
+        u.searchParams.set('b', String(itemBId || ''));
+        const r = await fetch(u.toString());
+        if (!r.ok) return false;
+        const payload = await r.json();
+        return !!(payload && payload.rejected === true);
+    } catch {
+        return false;
     }
 }
 
@@ -259,6 +296,46 @@ function persistIconPathForItem(id, iconPath) {
     if (cachedBaseItemsMap && cachedBaseItemsMap[id]) {
         cachedBaseItemsMap[id] = { ...cachedBaseItemsMap[id], iconPath };
     }
+}
+
+const DISCOVERY_UPLOAD_LIMIT_PNG_JPG = 20 * 1024;
+const DISCOVERY_UPLOAD_LIMIT_GIF = 120 * 1024;
+
+/**
+ * @param {File} file
+ * @returns {{ ok: true } | { ok: false, message: string }}
+ */
+function validateDiscoveryUploadFile(file) {
+    if (!(file instanceof File)) return { ok: false, message: 'Pick a PNG, JPG, or GIF file first.' };
+    const name = String(file.name || '').toLowerCase();
+    const type = String(file.type || '').toLowerCase();
+    const isGif = type === 'image/gif' || name.endsWith('.gif');
+    const isPng = type === 'image/png' || name.endsWith('.png');
+    const isJpg = type === 'image/jpeg' || name.endsWith('.jpg') || name.endsWith('.jpeg');
+    if (!isGif && !isPng && !isJpg) {
+        return { ok: false, message: 'Only PNG, JPG, and GIF are allowed.' };
+    }
+    if (isGif) {
+        if (file.size > DISCOVERY_UPLOAD_LIMIT_GIF) {
+            return { ok: false, message: 'GIF must be 120KB or smaller.' };
+        }
+    } else if (file.size >= DISCOVERY_UPLOAD_LIMIT_PNG_JPG) {
+        return { ok: false, message: 'PNG/JPG must be smaller than 20KB.' };
+    }
+    return { ok: true };
+}
+
+/**
+ * @param {File} file
+ * @returns {Promise<string>}
+ */
+function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => reject(new Error('Could not read file.'));
+        fr.readAsDataURL(file);
+    });
 }
 
 /** Remove emoji / pictograph clusters (ZWJ sequences, skin tones) for display and storage. */
@@ -664,6 +741,30 @@ function slugFromNameText(nameText) {
     return t.toLowerCase().replace(/\s/g, '-');
 }
 
+function normalizeItemNameColor(raw) {
+    const c = String(raw || '').trim().toLowerCase();
+    return /^#[0-9a-f]{6}$/.test(c) ? c : '';
+}
+
+function safeUsernameForDiscoveryName() {
+    const u = String(state.auth.username || '').trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+    return u || 'player';
+}
+
+function discoveryDateStamp() {
+    const d = new Date();
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const pad3 = (n) => String(n).padStart(3, '0');
+    return (
+        `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_` +
+        `${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}${pad3(d.getMilliseconds())}`
+    );
+}
+
+function makeUnnamedDiscoveryName() {
+    return `unnamed_${discoveryDateStamp()}_${safeUsernameForDiscoveryName()}`;
+}
+
 /** Turn { resultId: { a, b, name } } into sorted combo keys for lookup */
 function buildRecipeIndex(recipesByResultId) {
     const index = {};
@@ -736,12 +837,14 @@ function itemsMapToState(items) {
     const recipesRaw = {};
     for (const [id, def] of Object.entries(items)) {
         if (!def || typeof def.name !== 'string' || typeof def.emoji !== 'string') continue;
-        const row = /** @type {{ id: string, emoji: string, name: string, tier: number, iconPath?: string }} */ ({
+        const row = /** @type {{ id: string, emoji: string, name: string, tier: number, iconPath?: string, nameColor?: string }} */ ({
             id,
             emoji: def.emoji,
             name: def.name,
             tier: 0
         });
+        const nameColor = normalizeItemNameColor(def.nameColor);
+        if (nameColor) row.nameColor = nameColor;
         if (typeof def.iconPath === 'string' && def.iconPath.trim()) {
             row.iconPath = def.iconPath.trim();
         }
@@ -770,19 +873,150 @@ async function loadGameData() {
 }
 
 /**
- * @param {Record<string, { emoji?: string, name?: string, discoveredAt?: string }>} items
+ * @param {Record<string, { emoji?: string, name?: string, nameColor?: string, discoveredAt?: string, a?: string, b?: string, upvotes?: number, downvotes?: number }>} items
  */
 function buildGlobalDiscoveriesRows(items) {
     const rows = [];
     for (const [id, def] of Object.entries(items || {})) {
         if (!def || typeof def.name !== 'string' || typeof def.emoji !== 'string') continue;
         const row = { id, name: def.name, emoji: def.emoji };
+        const nameColor = normalizeItemNameColor(def.nameColor);
+        if (nameColor) row.nameColor = nameColor;
+        if (typeof def.a === 'string' && def.a && typeof def.b === 'string' && def.b) {
+            row.ingredientA = def.a;
+            row.ingredientB = def.b;
+            const aDef = items[def.a];
+            const bDef = items[def.b];
+            row.ingredientAText = aDef && typeof aDef.name === 'string' ? aDef.name : def.a;
+            row.ingredientBText = bDef && typeof bDef.name === 'string' ? bDef.name : def.b;
+        }
         if (typeof def.discoveredAt === 'string' && def.discoveredAt.trim()) {
             row.discoveredAt = def.discoveredAt.trim();
+        }
+        if (Number.isFinite(Number(def.upvotes))) {
+            row.upvotes = Math.max(0, Number(def.upvotes) | 0);
+        }
+        if (Number.isFinite(Number(def.downvotes))) {
+            row.downvotes = Math.max(0, Number(def.downvotes) | 0);
         }
         rows.push(row);
     }
     return rows;
+}
+
+/**
+ * @param {{ discoveredAt?: string, ingredientA?: string, ingredientB?: string }} row
+ * @returns {boolean}
+ */
+function isRowVoteEligible(row) {
+    if (!row || !row.discoveredAt || !row.ingredientA || !row.ingredientB) return false;
+    const ts = Date.parse(row.discoveredAt);
+    if (!Number.isFinite(ts)) return false;
+    return Date.now() - ts <= 5 * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * @param {string} id
+ * @param {'up' | 'down'} vote
+ * @returns {Promise<{ upvotes: number, downvotes: number }>}
+ */
+async function postDiscoveryVote(id, vote) {
+    const r = await apiFetch('/api/items/vote', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ id, vote })
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return {
+        upvotes: Math.max(0, Number(out && out.upvotes) | 0),
+        downvotes: Math.max(0, Number(out && out.downvotes) | 0)
+    };
+}
+
+/**
+ * @param {string} itemId
+ * @returns {Promise<{ id: number, itemId: string, proposalType: 'name'|'image', proposedName?: string, proposedImagePath?: string, createdBy: number, createdAt: string, upvotes: number, downvotes: number, myVote: number }[]>}
+ */
+async function fetchDiscoveryProposals(itemId) {
+    const u = new URL(`${apiOrigin()}/api/discovery-proposals`);
+    u.searchParams.set('itemId', String(itemId || ''));
+    const r = await fetch(u.toString(), {
+        headers: authHeaders({})
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return Array.isArray(out && out.proposals) ? out.proposals : [];
+}
+
+/**
+ * @param {number} proposalId
+ * @param {'up'|'down'} vote
+ * @returns {Promise<{ upvotes: number, downvotes: number, myVote: number }>}
+ */
+async function postDiscoveryProposalVote(proposalId, vote) {
+    const r = await apiFetch('/api/discovery-proposals/vote', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ proposalId, vote })
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return {
+        upvotes: Math.max(0, Number(out && out.upvotes) | 0),
+        downvotes: Math.max(0, Number(out && out.downvotes) | 0),
+        myVote: Number(out && out.myVote ? out.myVote : 0) | 0
+    };
+}
+
+/**
+ * @param {string} itemId
+ * @param {{ proposalType: 'name'|'image', proposedName?: string, imageUrl?: string, imageDataUrl?: string }} payload
+ */
+async function postCreateDiscoveryProposal(itemId, payload) {
+    const body = { itemId, proposalType: payload.proposalType };
+    if (payload.proposalType === 'name') {
+        body.proposedName = String(payload.proposedName || '').trim();
+    } else {
+        if (typeof payload.imageUrl === 'string' && payload.imageUrl.trim()) body.imageUrl = payload.imageUrl.trim();
+        if (typeof payload.imageDataUrl === 'string' && payload.imageDataUrl.trim()) {
+            body.imageDataUrl = payload.imageDataUrl.trim();
+        }
+    }
+    const r = await apiFetch('/api/discovery-proposals', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body)
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    return JSON.parse(t);
+}
+
+/**
+ * @param {string} relPath
+ * @returns {string}
+ */
+function proposalImageSrc(relPath) {
+    return `${apiOrigin()}/${String(relPath || '').replace(/^\/+/, '')}`;
+}
+
+function setDiscoveryVoteOptionsModalOpen(open) {
+    if (!discoveryVoteOptionsModalEl) return;
+    discoveryVoteOptionsModalEl.classList.toggle('hidden', !open);
+}
+
+function setDiscoveryNameProposalModalOpen(open) {
+    if (!discoveryNameProposalModalEl) return;
+    discoveryNameProposalModalEl.classList.toggle('hidden', !open);
+}
+
+function setDiscoveryImageProposalModalOpen(open) {
+    if (!discoveryImageProposalModalEl) return;
+    discoveryImageProposalModalEl.classList.toggle('hidden', !open);
 }
 
 function renderGlobalDiscoveriesPage() {
@@ -811,15 +1045,140 @@ function renderGlobalDiscoveriesPage() {
         globalDiscoveriesListEl.appendChild(empty);
     } else {
         for (const row of pageRows) {
-            const line = document.createElement('div');
-            line.className = 'px-4 py-2.5 flex items-center gap-3';
-            line.innerHTML =
-                `<span class="text-xl leading-none select-none" aria-hidden="true">${row.emoji || '·'}</span>` +
-                `<div class="min-w-0 flex-1">` +
-                `<div class="text-sm text-slate-100 truncate">${row.name}</div>` +
-                `<div class="text-[11px] text-slate-500 truncate">${row.id}${row.discoveredAt ? ` - ${new Date(row.discoveredAt).toLocaleString()}` : ''}</div>` +
-                `</div>`;
-            globalDiscoveriesListEl.appendChild(line);
+            const voteEligible = isRowVoteEligible(row);
+            const upvotes = Math.max(0, Number(row.upvotes || 0) | 0);
+            const downvotes = Math.max(0, Number(row.downvotes || 0) | 0);
+            const comboText =
+                row.ingredientAText && row.ingredientBText
+                    ? `${row.ingredientAText} + ${row.ingredientBText}`
+                    : 'Starter item';
+
+            const wrap = document.createElement('div');
+            wrap.className = 'px-4 py-2.5';
+            wrap.setAttribute('data-discovery-item-id', row.id);
+
+            const top = document.createElement('div');
+            top.className = 'flex items-center gap-3';
+            top.setAttribute('data-discovery-expand-toggle', row.id);
+
+            const emojiEl = document.createElement('span');
+            emojiEl.className = 'text-xl leading-none select-none';
+            emojiEl.setAttribute('aria-hidden', 'true');
+            emojiEl.textContent = row.emoji || '·';
+            top.appendChild(emojiEl);
+
+            const textWrap = document.createElement('div');
+            textWrap.className = 'min-w-0 flex-1';
+            const nameEl = document.createElement('div');
+            nameEl.className = 'text-sm text-slate-100 truncate';
+            if (row.nameColor) nameEl.style.color = row.nameColor;
+            nameEl.textContent = row.name;
+            const comboEl = document.createElement('div');
+            comboEl.className = 'text-[11px] text-slate-400 truncate';
+            comboEl.textContent = comboText;
+            const metaEl = document.createElement('div');
+            metaEl.className = 'text-[11px] text-slate-500 truncate';
+            metaEl.textContent = `${row.id}${row.discoveredAt ? ` - ${new Date(row.discoveredAt).toLocaleString()}` : ''}`;
+            textWrap.appendChild(nameEl);
+            textWrap.appendChild(comboEl);
+            textWrap.appendChild(metaEl);
+            top.appendChild(textWrap);
+
+            const right = document.createElement('div');
+            right.className = 'ml-2 shrink-0 flex items-center gap-1.5';
+            if (voteEligible) {
+                const upBtn = document.createElement('button');
+                upBtn.type = 'button';
+                upBtn.className =
+                    'min-h-[30px] px-2 rounded-md border border-emerald-700/80 bg-emerald-900/40 text-emerald-200 text-xs font-semibold hover:bg-emerald-800/60';
+                upBtn.setAttribute('data-discovery-vote-btn', '1');
+                upBtn.setAttribute('data-vote', 'up');
+                upBtn.setAttribute('data-id', row.id);
+                upBtn.textContent = `▲ ${upvotes}`;
+                right.appendChild(upBtn);
+
+                const downBtn = document.createElement('button');
+                downBtn.type = 'button';
+                downBtn.className =
+                    'min-h-[30px] px-2 rounded-md border border-rose-700/80 bg-rose-900/40 text-rose-200 text-xs font-semibold hover:bg-rose-800/60';
+                downBtn.setAttribute('data-discovery-vote-btn', '1');
+                downBtn.setAttribute('data-vote', 'down');
+                downBtn.setAttribute('data-id', row.id);
+                downBtn.textContent = `▼ ${downvotes}`;
+                right.appendChild(downBtn);
+
+                const proposalBtn = document.createElement('button');
+                proposalBtn.type = 'button';
+                proposalBtn.className =
+                    'min-h-[30px] px-2 rounded-md border border-blue-700/80 bg-blue-900/40 text-blue-200 text-xs font-semibold hover:bg-blue-800/60';
+                proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
+                proposalBtn.setAttribute('data-id', row.id);
+                proposalBtn.textContent = 'Vote...';
+                right.appendChild(proposalBtn);
+            }
+            top.appendChild(right);
+            wrap.appendChild(top);
+
+            const expanded = document.createElement('div');
+            expanded.className = 'mt-2 ml-8 border border-slate-700 rounded-lg bg-slate-900/60 p-2 hidden';
+            expanded.setAttribute('data-discovery-expanded', row.id);
+            const props = discoveryProposalsByItem[row.id] || [];
+            if (!props.length) {
+                const none = document.createElement('div');
+                none.className = 'text-xs text-slate-500';
+                none.textContent = voteEligible ? 'No active proposals yet. Use Vote... to start one.' : 'Voting window closed.';
+                expanded.appendChild(none);
+            } else {
+                props.forEach((p) => {
+                    const line = document.createElement('div');
+                    line.className = 'mb-2 last:mb-0 rounded border border-slate-700 bg-slate-950/50 p-2';
+                    const title = document.createElement('div');
+                    title.className = 'text-xs text-slate-200';
+                    title.textContent = p.proposalType === 'name' ? `Name: ${p.proposedName || ''}` : 'Image proposal';
+                    line.appendChild(title);
+                    if (p.proposalType === 'image' && p.proposedImagePath) {
+                        const img = document.createElement('img');
+                        img.className = 'mt-1 w-16 h-16 object-contain rounded border border-slate-600 bg-slate-900';
+                        img.src = proposalImageSrc(p.proposedImagePath);
+                        img.alt = 'Proposed icon';
+                        line.appendChild(img);
+                    }
+                    const footer = document.createElement('div');
+                    footer.className = 'mt-2 flex items-center gap-1.5';
+                    const up = document.createElement('button');
+                    up.type = 'button';
+                    up.className =
+                        'min-h-[28px] px-2 rounded-md border text-xs font-semibold ' +
+                        (p.myVote === 1
+                            ? 'border-emerald-400 bg-emerald-700/60 text-emerald-100'
+                            : 'border-emerald-700/80 bg-emerald-900/40 text-emerald-200');
+                    up.setAttribute('data-discovery-proposal-vote-btn', '1');
+                    up.setAttribute('data-proposal-vote', 'up');
+                    up.setAttribute('data-proposal-id', String(p.id));
+                    up.setAttribute('data-item-id', row.id);
+                    up.textContent = `▲ ${Math.max(0, Number(p.upvotes || 0) | 0)}`;
+                    footer.appendChild(up);
+                    const down = document.createElement('button');
+                    down.type = 'button';
+                    down.className =
+                        'min-h-[28px] px-2 rounded-md border text-xs font-semibold ' +
+                        (p.myVote === -1
+                            ? 'border-rose-400 bg-rose-700/60 text-rose-100'
+                            : 'border-rose-700/80 bg-rose-900/40 text-rose-200');
+                    down.setAttribute('data-discovery-proposal-vote-btn', '1');
+                    down.setAttribute('data-proposal-vote', 'down');
+                    down.setAttribute('data-proposal-id', String(p.id));
+                    down.setAttribute('data-item-id', row.id);
+                    down.textContent = `▼ ${Math.max(0, Number(p.downvotes || 0) | 0)}`;
+                    footer.appendChild(down);
+                    line.appendChild(footer);
+                    expanded.appendChild(line);
+                });
+            }
+            if (globalDiscoveriesExpandedId === row.id) expanded.classList.remove('hidden');
+            wrap.appendChild(expanded);
+
+            globalDiscoveriesListEl.appendChild(wrap);
         }
     }
     if (globalDiscoveriesCountEl) {
@@ -840,6 +1199,16 @@ async function refreshGlobalDiscoveriesFromApi() {
     if (!items) throw new Error('Invalid /api/items response');
     globalDiscoveriesRows = buildGlobalDiscoveriesRows(items);
     renderGlobalDiscoveriesPage();
+}
+
+/**
+ * @param {string} itemId
+ */
+async function refreshDiscoveryProposalsForItem(itemId) {
+    const id = String(itemId || '').trim();
+    if (!id) return;
+    const rows = await fetchDiscoveryProposals(id);
+    discoveryProposalsByItem[id] = rows;
 }
 
 function setGlobalDiscoveriesModalOpen(open) {
@@ -872,6 +1241,9 @@ const authRegisterBtn = document.getElementById('auth-register-btn');
 const authLogoutBtn = document.getElementById('auth-logout-btn');
 const authUserPillEl = document.getElementById('auth-user-pill');
 const openGlobalDiscoveriesBtn = document.getElementById('open-global-discoveries');
+const floatingDiscoveryAlertWrapEl = document.getElementById('floating-discovery-alert');
+const openLatestDiscoveryBtn = document.getElementById('open-latest-discovery');
+const floatingDiscoveryAlertCountEl = document.getElementById('floating-discovery-alert-count');
 const globalDiscoveriesModalEl = document.getElementById('global-discoveries-modal');
 const closeGlobalDiscoveriesBtn = document.getElementById('close-global-discoveries');
 const globalDiscoveriesCountEl = document.getElementById('global-discoveries-count');
@@ -880,6 +1252,29 @@ const globalDiscoveriesListEl = document.getElementById('global-discoveries-list
 const globalDiscoveriesSortEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('global-discoveries-sort'));
 const globalDiscoveriesPrevBtn = document.getElementById('global-discoveries-prev');
 const globalDiscoveriesNextBtn = document.getElementById('global-discoveries-next');
+const discoveryVoteOptionsModalEl = document.getElementById('discovery-vote-options-modal');
+const closeDiscoveryVoteOptionsBtn = document.getElementById('close-discovery-vote-options');
+const openDiscoveryNameProposalBtn = document.getElementById('open-discovery-name-proposal');
+const openDiscoveryImageProposalBtn = document.getElementById('open-discovery-image-proposal');
+const discoveryNameProposalModalEl = document.getElementById('discovery-name-proposal-modal');
+const closeDiscoveryNameProposalBtn = document.getElementById('close-discovery-name-proposal');
+const discoveryProposedNameInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-proposed-name-input'));
+const discoveryNameProposalStatusEl = document.getElementById('discovery-name-proposal-status');
+const submitDiscoveryNameProposalBtn = document.getElementById('submit-discovery-name-proposal');
+const discoveryImageProposalModalEl = document.getElementById('discovery-image-proposal-modal');
+const closeDiscoveryImageProposalBtn = document.getElementById('close-discovery-image-proposal');
+const discoveryProposedImageUrlInputEl = /** @type {HTMLInputElement | null} */ (
+    document.getElementById('discovery-proposed-image-url')
+);
+const submitDiscoveryImageUrlProposalBtn = document.getElementById('submit-discovery-image-url-proposal');
+const openDiscoveryImageUploadProposalBtn = document.getElementById('open-discovery-image-upload-proposal');
+const discoveryProposedImageFileInputEl = /** @type {HTMLInputElement | null} */ (
+    document.getElementById('discovery-proposed-image-file')
+);
+const discoveryImageProposalStatusEl = document.getElementById('discovery-image-proposal-status');
+const discoveryImageProposalPreviewEl = /** @type {HTMLImageElement | null} */ (
+    document.getElementById('discovery-image-proposal-preview')
+);
 
 /** @type {null | ReturnType<typeof setInterval>} */
 let factoryLoopTimerId = null;
@@ -1302,6 +1697,10 @@ const discoveryAiImageBtn = document.getElementById('discovery-ai-image-btn');
 const discoveryTakeIconBtn = document.getElementById('discovery-take-icon');
 const discoveryIconUrlInput = document.getElementById('discovery-icon-url');
 const discoveryApplyIconUrlBtn = document.getElementById('discovery-apply-icon-url');
+const discoveryUploadIconBtn = document.getElementById('discovery-upload-icon-btn');
+const discoveryUploadIconFileInput = /** @type {HTMLInputElement | null} */ (
+    document.getElementById('discovery-upload-icon-file')
+);
 const discoveryAiImageStatus = document.getElementById('discovery-ai-image-status');
 const discoveryAiImageImg = document.getElementById('discovery-ai-image-img');
 const discoveryAiImageGridEl = document.getElementById('discovery-ai-image-grid');
@@ -1309,6 +1708,7 @@ const saveDiscoveryBtn = document.getElementById('save-discovery');
 const rejectDiscoveryBtn = document.getElementById('reject-discovery');
 const discoveryNameInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-name-input'));
 const discoveryEmojiInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-emoji-input'));
+const discoveryNameColorGridEl = document.getElementById('discovery-name-color-grid');
 
 /** How many icons the image API requests per “Generate icon” run. */
 const DISCOVERY_ICON_VARIANT_COUNT = 1;
@@ -1356,6 +1756,32 @@ function showDiscoveryCheckModal() {
 
 function hideDiscoveryCheckModal() {
     if (discoveryCheckModal) discoveryCheckModal.classList.add('hidden');
+}
+
+function updateFloatingDiscoveryAlert(blink) {
+    const hasPending = !!state.pendingDiscoveryNotice;
+    if (floatingDiscoveryAlertWrapEl) {
+        floatingDiscoveryAlertWrapEl.classList.toggle('hidden', !hasPending);
+    }
+    if (floatingDiscoveryAlertCountEl) {
+        floatingDiscoveryAlertCountEl.textContent = hasPending ? '1' : '0';
+    }
+    if (!openLatestDiscoveryBtn) return;
+    openLatestDiscoveryBtn.disabled = !hasPending;
+    if (blink && hasPending) {
+        openLatestDiscoveryBtn.classList.remove('is-blinking');
+        void openLatestDiscoveryBtn.offsetWidth;
+        openLatestDiscoveryBtn.classList.add('is-blinking');
+        setTimeout(() => {
+            if (openLatestDiscoveryBtn) openLatestDiscoveryBtn.classList.remove('is-blinking');
+        }, 2000);
+    }
+}
+
+function getDiscoveryExistingItemId() {
+    return state.pendingCombination && typeof state.pendingCombination.resultId === 'string'
+        ? state.pendingCombination.resultId
+        : '';
 }
 
 /**
@@ -1447,7 +1873,9 @@ function resetDiscoveryAiImagePreview() {
     if (discoveryAiImageBtn) discoveryAiImageBtn.disabled = false;
     if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
     if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = false;
+    if (discoveryUploadIconBtn) discoveryUploadIconBtn.disabled = false;
     if (discoveryIconUrlInput) discoveryIconUrlInput.value = '';
+    if (discoveryUploadIconFileInput) discoveryUploadIconFileInput.value = '';
     if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = '';
     clearDiscoveryAiImageGrid();
     if (discoveryAiImageImg) {
@@ -1514,26 +1942,21 @@ async function generateDiscoveryIconPreview() {
     }
 }
 
-async function saveDiscoveryAndStartIcon() {
-    const text = getDiscoveryChosenName();
-    if (!text || suggestionAlreadyInLibrary(text)) return;
-    const pending = state.pendingCombination;
-    if (!pending) return;
-
-    const icon = getDiscoveryChosenEmoji();
-    const id = slugFromNameText(text);
-    const newElement = { id, emoji: icon, name: text };
-    const ingA = pending.a.id;
-    const ingB = pending.b.id;
-
-    state.recipes[pending.key] = { id, emoji: icon, name: text };
-
+function upsertDiscoveryLocalRecord(id, emoji, name, nameColor, ingredientA, ingredientB) {
+    state.recipes[[ingredientA, ingredientB].sort().join('+')] = { id, emoji, name };
     const li = state.library.findIndex((e) => e.id === id);
-    if (li === -1) state.library.push(newElement);
-    else state.library[li] = newElement;
+    const row = { id, emoji, name };
+    const normalizedColor = normalizeItemNameColor(nameColor);
+    if (normalizedColor) row.nameColor = normalizedColor;
+    if (li === -1) state.library.push(row);
+    else state.library[li] = row;
     recomputeAllTiers();
+}
 
-    const factoryCombKey = state.factory.factoryDiscoveryCombinerKey;
+function placeDiscoveryResultForPending(pending, id, emoji, name) {
+    if (pending.resultPlaced) return;
+    const newElement = { id, emoji, name };
+    const factoryCombKey = pending.factoryCombKey || '';
     if (!factoryCombKey) {
         const midX = (pending.a.x + pending.b.x) / 2;
         const midY = (pending.a.y + pending.b.y) / 2;
@@ -1541,33 +1964,58 @@ async function saveDiscoveryAndStartIcon() {
         createElementOnCanvas(placed, midX + 40, midY + 40);
         showPulse(midX + 40, midY + 40, 'bg-yellow-400');
     } else {
-        state.factory.factoryDiscoveryCombinerKey = null;
         delete state.factory.combinerDiscovery[factoryCombKey];
         state.factory.cellItems[factoryCombKey] = id;
     }
+    pending.resultPlaced = true;
+}
 
-    state.discoveryIconItemName = text;
-
-    state.pendingCombination = null;
-    state.aiSuggestions = [];
-    state.discoverySelectedName = '';
-    if (aiWrap) aiWrap.classList.add('hidden');
-    clearAiFullReplyUi();
-    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
-    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
-
+async function savePendingDiscovery(pending, name, emoji, nameColor) {
+    if (!pending || !pending.a || !pending.b) return;
+    const text = String(name || '').trim();
+    if (!text) return;
+    const icon = normalizeSuggestionEmoji(emoji) || '✨';
+    const normalizedColor = normalizeItemNameColor(nameColor);
+    const existingId = typeof pending.resultId === 'string' ? pending.resultId : '';
+    const id = existingId || slugFromNameText(text);
+    upsertDiscoveryLocalRecord(
+        id,
+        icon,
+        text,
+        normalizedColor,
+        String(pending.a.id || ''),
+        String(pending.b.id || '')
+    );
+    placeDiscoveryResultForPending(pending, id, icon, text);
+    pending.resultId = id;
+    pending.name = text;
+    pending.emoji = icon;
+    pending.nameColor = normalizedColor;
     renderLibrary();
-    modal.classList.add('hidden');
-
-    if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = true;
     try {
         await postItemUpsertRemote({
             id,
             emoji: icon,
             name: text,
-            ingredient_a: ingA,
-            ingredient_b: ingB
+            name_color: normalizedColor || '',
+            ingredient_a: String(pending.a.id || ''),
+            ingredient_b: String(pending.b.id || '')
         });
+    } catch (err) {
+        console.warn(err);
+    }
+}
+
+async function saveDiscoveryAndStartIcon() {
+    const text = getDiscoveryChosenName();
+    if (!text || suggestionAlreadyInLibrary(text)) return;
+    const pending = state.pendingCombination;
+    if (!pending) return;
+    const icon = getDiscoveryChosenEmoji();
+    const nameColor = state.discoveryNameColor;
+    if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = true;
+    try {
+        await savePendingDiscovery(pending, text, icon, nameColor);
     } catch (err) {
         console.warn(err);
         if (discoveryAiImageStatus) {
@@ -1575,15 +2023,46 @@ async function saveDiscoveryAndStartIcon() {
                 'Could not sync to catalog — try again. ' +
                 (err && typeof err.message === 'string' ? err.message.slice(0, 120) : '');
         }
+        return;
     } finally {
         if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = false;
+    }
+
+    const itemId = String(pending.resultId || '');
+    state.discoveryIconItemName = text;
+    state.discoveryIconItemId = itemId;
+    state.pendingCombination = null;
+    state.aiSuggestions = [];
+    state.discoverySelectedName = '';
+    if (aiWrap) aiWrap.classList.add('hidden');
+    clearAiFullReplyUi();
+    if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
+    if (aiOutgoingEl) aiOutgoingEl.textContent = '';
+    state.discoveryPreviewUrl = '';
+    clearDiscoveryAiImageGrid();
+    if (discoveryAiImageImg) {
+        discoveryAiImageImg.removeAttribute('src');
+        discoveryAiImageImg.classList.add('hidden');
+    }
+    if (saveDiscoveryBtn) {
+        saveDiscoveryBtn.disabled = true;
+        saveDiscoveryBtn.textContent = 'Saved';
+    }
+    if (discoveryAiImageStatus) {
+        discoveryAiImageStatus.textContent = itemId
+            ? 'Discovery saved. Add icon from URL or upload, then close.'
+            : 'Discovery saved.';
     }
 }
 
 async function applyDiscoveryIconFromUrl() {
     const itemId = state.discoveryIconItemId;
     const raw = discoveryIconUrlInput ? discoveryIconUrlInput.value.trim() : '';
-    if (!itemId || !raw) {
+    if (!itemId) {
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Confirm discovery first, then load icon URL.';
+        return;
+    }
+    if (!raw) {
         if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Enter an image URL first.';
         return;
     }
@@ -1624,9 +2103,50 @@ async function applyDiscoveryIconFromUrl() {
     }
 }
 
+async function applyDiscoveryIconFromUpload(file) {
+    const itemId = state.discoveryIconItemId;
+    if (!itemId) {
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Confirm discovery first, then upload icon.';
+        return;
+    }
+    const v = validateDiscoveryUploadFile(file);
+    if (!v.ok) {
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = v.message;
+        return;
+    }
+    if (discoveryUploadIconBtn) discoveryUploadIconBtn.disabled = true;
+    if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Uploading…';
+    try {
+        const imageDataUrl = await fileToDataUrl(file);
+        const out = await postSaveItemIconRemote(itemId, '', { strictUserUrl: true, imageDataUrl });
+        state.discoveryPreviewUrl = '';
+        clearDiscoveryAiImageGrid();
+        if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
+            persistIconPathForItem(itemId, out.iconPath.trim());
+        }
+        await reloadCatalogFromApi();
+        if (discoveryAiImageImg && out.iconPath) {
+            discoveryAiImageImg.src = `${apiOrigin()}/${String(out.iconPath).replace(/^\/+/, '')}?t=${Date.now()}`;
+            discoveryAiImageImg.classList.remove('hidden');
+        }
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Icon uploaded. GIFs stay animated in icons.';
+        if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = msg.slice(0, 280);
+    } finally {
+        if (discoveryUploadIconBtn) discoveryUploadIconBtn.disabled = false;
+        if (discoveryUploadIconFileInput) discoveryUploadIconFileInput.value = '';
+    }
+}
+
 function suggestionAlreadyInLibrary(nameText) {
     const id = slugFromNameText(nameText);
-    return state.library.some((e) => e.id === id || slugFromNameText(e.name) === id);
+    const currentId = getDiscoveryExistingItemId();
+    return state.library.some((e) => {
+        if (currentId && e.id === currentId) return false;
+        return e.id === id || slugFromNameText(e.name) === id;
+    });
 }
 
 function getDiscoveryChosenName() {
@@ -1657,6 +2177,27 @@ function syncDiscoverySelectedNameUi() {
 function isDiscoveryNameAllowed(name) {
     const n = String(name || '').trim();
     return n.length > 0;
+}
+
+function setDiscoveryNameColor(color) {
+    state.discoveryNameColor = normalizeItemNameColor(color);
+    renderDiscoveryNameColorChoices();
+}
+
+function renderDiscoveryNameColorChoices() {
+    if (!discoveryNameColorGridEl) return;
+    discoveryNameColorGridEl.innerHTML = '';
+    for (const color of DISCOVERY_NAME_COLOR_CHOICES) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'discovery-color-swatch' + (state.discoveryNameColor === color ? ' is-selected' : '');
+        btn.style.backgroundColor = color;
+        btn.title = color;
+        btn.setAttribute('aria-label', `Name color ${color}`);
+        btn.setAttribute('aria-pressed', state.discoveryNameColor === color ? 'true' : 'false');
+        btn.addEventListener('click', () => setDiscoveryNameColor(color));
+        discoveryNameColorGridEl.appendChild(btn);
+    }
 }
 
 function updateDiscoverySaveButton() {
@@ -1748,6 +2289,38 @@ function startAiForCombination(a, b) {
     runDiscoveryAi(a, b);
 }
 
+async function queueDiscoveryNotice(a, b, comboKey, preloadedParsed, factoryCombKey) {
+    const previous = state.pendingDiscoveryNotice;
+    if (previous) {
+        const fallbackName = previous.name || makeUnnamedDiscoveryName();
+        const fallbackEmoji = previous.emoji || '✨';
+        await savePendingDiscovery(previous, fallbackName, fallbackEmoji, previous.nameColor || '');
+    }
+    const notice = {
+        a,
+        b,
+        key: comboKey,
+        preloadedParsed,
+        resultId: '',
+        resultPlaced: false,
+        factoryCombKey: String(factoryCombKey || ''),
+        name: '',
+        emoji: '✨'
+    };
+    const unnamedName = makeUnnamedDiscoveryName();
+    await savePendingDiscovery(notice, unnamedName, '✨', '');
+    state.pendingDiscoveryNotice = notice;
+    updateFloatingDiscoveryAlert(true);
+}
+
+function openLatestPendingDiscoveryModal() {
+    const notice = state.pendingDiscoveryNotice;
+    if (!notice) return;
+    state.pendingDiscoveryNotice = null;
+    updateFloatingDiscoveryAlert(false);
+    openDiscoveryModal(notice, notice.preloadedParsed);
+}
+
 // Initialize Library
 function renderLibrary() {
     libraryEl.innerHTML = '';
@@ -1778,6 +2351,10 @@ function renderLibrary() {
         const nameEl = document.createElement('span');
         nameEl.className = 'text-xs font-medium text-slate-300 text-center';
         nameEl.textContent = text;
+        const nameColor = normalizeItemNameColor(item.nameColor);
+        if (nameColor) {
+            nameEl.style.color = nameColor;
+        }
         const tierEl = document.createElement('span');
         tierEl.className = 'text-[9px] text-slate-500 mt-1 tabular-nums';
         tierEl.textContent = `T${tier}`;
@@ -2051,20 +2628,27 @@ function factoryLibraryStubForId(id) {
 }
 
 function openFactoryCombinerDiscovery(combinerKey, aId, bId, comboKey) {
-    state.factory.factoryDiscoveryCombinerKey = combinerKey;
+    void isRejectedCraftRemote(aId, bId).then((rejected) => {
+        if (rejected) {
+            state.factory.cellRejectFlashUntil[combinerKey] = performance.now() + 1000;
+            delete state.factory.combinerDiscovery[combinerKey];
+            renderFactoryGrid();
+            return;
+        }
     const a = factoryLibraryStubForId(aId);
     const b = factoryLibraryStubForId(bId);
     showDiscoveryCheckModal();
     fetchAiPropositions(a, b)
         .then((parsed) => {
             hideDiscoveryCheckModal();
-            openDiscoveryModal(a, b, comboKey, parsed);
+            void queueDiscoveryNotice(a, b, comboKey, parsed, combinerKey);
         })
         .catch((err) => {
             console.error(err);
             hideDiscoveryCheckModal();
-            openDiscoveryModal(a, b, comboKey);
+            void queueDiscoveryNotice(a, b, comboKey, undefined, combinerKey);
         });
+    });
 }
 
 /**
@@ -2827,12 +3411,14 @@ function createElementOnCanvas(data, x, y) {
 
     const emoji = typeof data.emoji === 'string' ? data.emoji : splitLabel(data.name).icon;
     const nameText = typeof data.name === 'string' ? data.name : splitLabel(data.name).text;
+    const nameColor = normalizeItemNameColor(data.nameColor);
 
     const instance = {
         uid: Math.random().toString(36).substr(2, 9),
         id: data.id,
         emoji,
         name: nameText,
+        nameColor,
         x: canvasX,
         y: canvasY
     };
@@ -2859,12 +3445,13 @@ function renderCanvas() {
         if (!el) {
             const icon = typeof item.emoji === 'string' ? item.emoji : splitLabel(item.name).icon;
             const text = typeof item.name === 'string' ? item.name : splitLabel(item.name).text;
+            const nameStyle = item.nameColor ? ` style="color:${item.nameColor}"` : '';
             el = document.createElement('div');
             el.className = 'canvas-element w-20 h-24 bg-slate-800/80 backdrop-blur-md border border-slate-600 rounded-xl shadow-2xl flex flex-col items-center justify-center cursor-move z-20';
             el.dataset.uid = item.uid;
             el.innerHTML = `
                 <span class="text-4xl pointer-events-none">${icon}</span>
-                <span class="text-[10px] uppercase font-bold text-slate-400 mt-2 pointer-events-none text-center px-1 leading-tight">${text}</span>
+                <span class="text-[10px] uppercase font-bold text-slate-400 mt-2 pointer-events-none text-center px-1 leading-tight"${nameStyle}>${text}</span>
             `;
 
             el.addEventListener('mousedown', (e) => startDragging(e, item, el));
@@ -2953,32 +3540,42 @@ async function combineAsync(a, b) {
         return;
     }
 
+    const rejected = await isRejectedCraftRemote(String(oldA.id || ''), String(oldB.id || ''));
+    if (rejected) {
+        state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
+        state.activeElements.push(oldA, oldB);
+        renderCanvas();
+        const midX = (a.x + b.x) / 2 + 40;
+        const midY = (a.y + b.y) / 2 + 40;
+        showPulse(midX, midY, 'bg-red-500');
+        return;
+    }
+
     state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
     renderCanvas();
     showDiscoveryCheckModal();
     fetchAiPropositions(oldA, oldB)
         .then((parsed) => {
             hideDiscoveryCheckModal();
-            openDiscoveryModal(oldA, oldB, comboKey, parsed);
+            void queueDiscoveryNotice(oldA, oldB, comboKey, parsed, '');
         })
         .catch((err) => {
             console.error(err);
             hideDiscoveryCheckModal();
-            openDiscoveryModal(oldA, oldB, comboKey);
+            void queueDiscoveryNotice(oldA, oldB, comboKey, undefined, '');
         });
 }
 
 /**
- * @param {unknown} a
- * @param {unknown} b
- * @param {string} comboKey
+ * @param {{ a: unknown, b: unknown, key: string, resultId?: string, resultPlaced?: boolean, factoryCombKey?: string, name?: string, emoji?: string }} pending
  * @param {{ suggestions: { name: string, emoji: string }[], explanation: string, makesenceYes: boolean | null } | undefined} preloadedParsed
  */
-function openDiscoveryModal(a, b, comboKey, preloadedParsed) {
+function openDiscoveryModal(pending, preloadedParsed) {
     state.discoveryIconItemName = '';
-    state.pendingCombination = { a, b, key: comboKey };
-    const la = promptPartsFromItem(a);
-    const lb = promptPartsFromItem(b);
+    state.pendingCombination = pending;
+    state.discoveryNameColor = normalizeItemNameColor(pending && pending.nameColor) || DISCOVERY_NAME_COLOR_CHOICES[0];
+    const la = promptPartsFromItem(pending.a);
+    const lb = promptPartsFromItem(pending.b);
     const modalRecipe = document.getElementById('modal-recipe-text');
     if (modalRecipe) {
         modalRecipe.innerText = `You combined ${la.text} and ${lb.text} and created something new!`;
@@ -2991,8 +3588,12 @@ function openDiscoveryModal(a, b, comboKey, preloadedParsed) {
     state.discoverySelectedName = '';
     if (discoveryNameInputEl) discoveryNameInputEl.value = '';
     if (discoveryEmojiInputEl) discoveryEmojiInputEl.value = '';
+    renderDiscoveryNameColorChoices();
     syncDiscoverySelectedNameUi();
-    if (saveDiscoveryBtn) saveDiscoveryBtn.disabled = true;
+    if (saveDiscoveryBtn) {
+        saveDiscoveryBtn.disabled = true;
+        saveDiscoveryBtn.textContent = 'Confirm';
+    }
     state.aiSuggestions = [];
     if (aiWrap) aiWrap.classList.remove('hidden');
     if (aiStatus) aiStatus.textContent = '';
@@ -3006,7 +3607,7 @@ function openDiscoveryModal(a, b, comboKey, preloadedParsed) {
     if (preloadedParsed) {
         applyDiscoveryAiResult(preloadedParsed);
     } else {
-        startAiForCombination(a, b);
+        startAiForCombination(pending.a, pending.b);
     }
 }
 
@@ -3019,6 +3620,17 @@ if (discoveryAiImageBtn) {
 if (discoveryApplyIconUrlBtn) {
     discoveryApplyIconUrlBtn.addEventListener('click', () => {
         void applyDiscoveryIconFromUrl();
+    });
+}
+
+if (discoveryUploadIconBtn && discoveryUploadIconFileInput) {
+    discoveryUploadIconBtn.addEventListener('click', () => {
+        discoveryUploadIconFileInput.click();
+    });
+    discoveryUploadIconFileInput.addEventListener('change', () => {
+        const file = discoveryUploadIconFileInput.files && discoveryUploadIconFileInput.files[0];
+        if (!file) return;
+        void applyDiscoveryIconFromUpload(file);
     });
 }
 
@@ -3076,28 +3688,7 @@ if (saveDiscoveryBtn) {
 
 function closeDiscoveryModalFromCancelFlow() {
     hideDiscoveryCheckModal();
-    if (state.factory.factoryDiscoveryCombinerKey) {
-        state.factory.factoryDiscoveryCombinerKey = null;
-        state.pendingCombination = null;
-        state.aiSuggestions = [];
-        state.discoverySelectedName = '';
-        if (discoveryNameInputEl) discoveryNameInputEl.value = '';
-        if (discoveryEmojiInputEl) discoveryEmojiInputEl.value = '';
-        state.discoveryIconItemName = '';
-        if (aiWrap) aiWrap.classList.add('hidden');
-        clearAiFullReplyUi();
-        if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
-        if (aiOutgoingEl) aiOutgoingEl.textContent = '';
-        modal.classList.add('hidden');
-        resetDiscoveryAiImagePreview();
-        return;
-    }
-    if (state.pendingCombination) {
-        state.activeElements.push(state.pendingCombination.a);
-        state.activeElements.push(state.pendingCombination.b);
-        state.pendingCombination = null;
-        renderCanvas();
-    }
+    state.pendingCombination = null;
     state.aiSuggestions = [];
     state.discoverySelectedName = '';
     if (discoveryNameInputEl) discoveryNameInputEl.value = '';
@@ -3118,6 +3709,12 @@ if (rejectDiscoveryBtn) {
         try {
             if (pending && pending.a && pending.b) {
                 await postRejectedCraftRemote(String(pending.a.id || ''), String(pending.b.id || ''));
+                if (pending.factoryCombKey) {
+                    const ck = String(pending.factoryCombKey);
+                    state.factory.cellRejectFlashUntil[ck] = performance.now() + 1000;
+                    delete state.factory.combinerDiscovery[ck];
+                    renderFactoryGrid();
+                }
             }
         } finally {
             rejectDiscoveryBtn.disabled = false;
@@ -3141,9 +3738,21 @@ if (discoveryEmojiInputEl) {
     });
 }
 
-document.getElementById('cancel-discovery').addEventListener('click', () => {
+document.getElementById('cancel-discovery').addEventListener('click', async () => {
+    const pending = state.pendingCombination;
+    if (pending) {
+        const fallbackName = pending.name || makeUnnamedDiscoveryName();
+        const fallbackEmoji = pending.emoji || '✨';
+        await savePendingDiscovery(pending, fallbackName, fallbackEmoji, pending.nameColor || '');
+    }
     closeDiscoveryModalFromCancelFlow();
 });
+
+if (openLatestDiscoveryBtn) {
+    openLatestDiscoveryBtn.addEventListener('click', () => {
+        openLatestPendingDiscoveryModal();
+    });
+}
 
 function showPulse(x, y, colorClass) {
     const pulse = document.createElement('div');
@@ -3188,6 +3797,8 @@ if (openGlobalDiscoveriesBtn) {
         openGlobalDiscoveriesBtn.disabled = true;
         try {
             globalDiscoveriesPage = 1;
+            globalDiscoveriesExpandedId = '';
+            discoveryProposalsByItem = {};
             await refreshGlobalDiscoveriesFromApi();
             setGlobalDiscoveriesModalOpen(true);
         } catch (e) {
@@ -3224,12 +3835,250 @@ if (globalDiscoveriesModalEl) {
     });
 }
 
+if (globalDiscoveriesListEl) {
+    globalDiscoveriesListEl.addEventListener('click', async (ev) => {
+        const t = ev.target;
+        if (!t || !(t instanceof Element)) return;
+        const voteBtn = t.closest('[data-discovery-vote-btn="1"]');
+        if (voteBtn) {
+            const id = String(voteBtn.getAttribute('data-id') || '').trim();
+            const vote =
+                voteBtn.getAttribute('data-vote') === 'down'
+                    ? 'down'
+                    : voteBtn.getAttribute('data-vote') === 'up'
+                      ? 'up'
+                      : '';
+            if (!id || !vote) return;
+            const row = globalDiscoveriesRows.find((r) => r.id === id);
+            if (!row || !isRowVoteEligible(row)) return;
+            const buttons = globalDiscoveriesListEl.querySelectorAll(`[data-discovery-vote-btn="1"][data-id="${id}"]`);
+            buttons.forEach((b) => b.setAttribute('disabled', 'disabled'));
+            try {
+                const out = await postDiscoveryVote(id, /** @type {'up' | 'down'} */ (vote));
+                row.upvotes = out.upvotes;
+                row.downvotes = out.downvotes;
+                if (cachedBaseItemsMap && cachedBaseItemsMap[id]) {
+                    cachedBaseItemsMap[id] = {
+                        ...cachedBaseItemsMap[id],
+                        upvotes: out.upvotes,
+                        downvotes: out.downvotes
+                    };
+                }
+                renderGlobalDiscoveriesPage();
+            } catch (e) {
+                console.warn('postDiscoveryVote', e);
+                const msg = e && typeof e.message === 'string' ? e.message : String(e);
+                alert(msg.slice(0, 180));
+                buttons.forEach((b) => b.removeAttribute('disabled'));
+            }
+            return;
+        }
+
+        const proposalOpenBtn = t.closest('[data-discovery-proposal-open-btn="1"]');
+        if (proposalOpenBtn) {
+            const id = String(proposalOpenBtn.getAttribute('data-id') || '').trim();
+            if (!id) return;
+            discoveryProposalTargetItemId = id;
+            if (discoveryNameProposalStatusEl) discoveryNameProposalStatusEl.textContent = '';
+            if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = '';
+            setDiscoveryVoteOptionsModalOpen(true);
+            return;
+        }
+
+        const proposalVoteBtn = t.closest('[data-discovery-proposal-vote-btn="1"]');
+        if (proposalVoteBtn) {
+            const proposalId = Number(proposalVoteBtn.getAttribute('data-proposal-id') || 0) | 0;
+            const itemId = String(proposalVoteBtn.getAttribute('data-item-id') || '').trim();
+            const vote =
+                proposalVoteBtn.getAttribute('data-proposal-vote') === 'down'
+                    ? 'down'
+                    : proposalVoteBtn.getAttribute('data-proposal-vote') === 'up'
+                      ? 'up'
+                      : '';
+            if (!proposalId || !itemId || !vote) return;
+            proposalVoteBtn.setAttribute('disabled', 'disabled');
+            try {
+                await postDiscoveryProposalVote(proposalId, /** @type {'up'|'down'} */ (vote));
+                await refreshDiscoveryProposalsForItem(itemId);
+                renderGlobalDiscoveriesPage();
+            } catch (e) {
+                console.warn('postDiscoveryProposalVote', e);
+                const msg = e && typeof e.message === 'string' ? e.message : String(e);
+                alert(msg.slice(0, 180));
+                proposalVoteBtn.removeAttribute('disabled');
+            }
+            return;
+        }
+
+        const expandToggle = t.closest('[data-discovery-expand-toggle]');
+        if (expandToggle) {
+            const id = String(expandToggle.getAttribute('data-discovery-expand-toggle') || '').trim();
+            if (!id) return;
+            if (globalDiscoveriesExpandedId === id) {
+                globalDiscoveriesExpandedId = '';
+                renderGlobalDiscoveriesPage();
+                return;
+            }
+            globalDiscoveriesExpandedId = id;
+            try {
+                await refreshDiscoveryProposalsForItem(id);
+            } catch (e) {
+                console.warn('refreshDiscoveryProposalsForItem', e);
+            }
+            renderGlobalDiscoveriesPage();
+        }
+    });
+}
+
 if (globalDiscoveriesSortEl) {
     globalDiscoveriesSortEl.value = globalDiscoveriesSort;
     globalDiscoveriesSortEl.addEventListener('change', () => {
         globalDiscoveriesSort = globalDiscoveriesSortEl.value === 'name' ? 'name' : 'datetime';
         globalDiscoveriesPage = 1;
         renderGlobalDiscoveriesPage();
+    });
+}
+
+if (closeDiscoveryVoteOptionsBtn) {
+    closeDiscoveryVoteOptionsBtn.addEventListener('click', () => setDiscoveryVoteOptionsModalOpen(false));
+}
+if (discoveryVoteOptionsModalEl) {
+    discoveryVoteOptionsModalEl.addEventListener('click', (e) => {
+        if (e.target === discoveryVoteOptionsModalEl) setDiscoveryVoteOptionsModalOpen(false);
+    });
+}
+
+if (openDiscoveryNameProposalBtn) {
+    openDiscoveryNameProposalBtn.addEventListener('click', () => {
+        setDiscoveryVoteOptionsModalOpen(false);
+        if (discoveryProposedNameInputEl) discoveryProposedNameInputEl.value = '';
+        if (discoveryNameProposalStatusEl) discoveryNameProposalStatusEl.textContent = '';
+        setDiscoveryNameProposalModalOpen(true);
+    });
+}
+
+if (openDiscoveryImageProposalBtn) {
+    openDiscoveryImageProposalBtn.addEventListener('click', () => {
+        setDiscoveryVoteOptionsModalOpen(false);
+        if (discoveryProposedImageUrlInputEl) discoveryProposedImageUrlInputEl.value = '';
+        if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = '';
+        if (discoveryImageProposalPreviewEl) {
+            discoveryImageProposalPreviewEl.classList.add('hidden');
+            discoveryImageProposalPreviewEl.removeAttribute('src');
+        }
+        if (discoveryProposedImageFileInputEl) discoveryProposedImageFileInputEl.value = '';
+        setDiscoveryImageProposalModalOpen(true);
+    });
+}
+
+if (closeDiscoveryNameProposalBtn) {
+    closeDiscoveryNameProposalBtn.addEventListener('click', () => setDiscoveryNameProposalModalOpen(false));
+}
+if (discoveryNameProposalModalEl) {
+    discoveryNameProposalModalEl.addEventListener('click', (e) => {
+        if (e.target === discoveryNameProposalModalEl) setDiscoveryNameProposalModalOpen(false);
+    });
+}
+
+if (closeDiscoveryImageProposalBtn) {
+    closeDiscoveryImageProposalBtn.addEventListener('click', () => setDiscoveryImageProposalModalOpen(false));
+}
+if (discoveryImageProposalModalEl) {
+    discoveryImageProposalModalEl.addEventListener('click', (e) => {
+        if (e.target === discoveryImageProposalModalEl) setDiscoveryImageProposalModalOpen(false);
+    });
+}
+
+if (submitDiscoveryNameProposalBtn) {
+    submitDiscoveryNameProposalBtn.addEventListener('click', async () => {
+        const itemId = String(discoveryProposalTargetItemId || '').trim();
+        const proposedName = String((discoveryProposedNameInputEl && discoveryProposedNameInputEl.value) || '').trim();
+        if (!itemId || !proposedName) {
+            if (discoveryNameProposalStatusEl) discoveryNameProposalStatusEl.textContent = 'Enter a proposed name.';
+            return;
+        }
+        submitDiscoveryNameProposalBtn.disabled = true;
+        if (discoveryNameProposalStatusEl) discoveryNameProposalStatusEl.textContent = 'Starting vote...';
+        try {
+            await postCreateDiscoveryProposal(itemId, { proposalType: 'name', proposedName });
+            await refreshDiscoveryProposalsForItem(itemId);
+            globalDiscoveriesExpandedId = itemId;
+            renderGlobalDiscoveriesPage();
+            if (discoveryNameProposalStatusEl) discoveryNameProposalStatusEl.textContent = 'Vote started.';
+            setDiscoveryNameProposalModalOpen(false);
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            if (discoveryNameProposalStatusEl) discoveryNameProposalStatusEl.textContent = msg.slice(0, 200);
+        } finally {
+            submitDiscoveryNameProposalBtn.disabled = false;
+        }
+    });
+}
+
+if (submitDiscoveryImageUrlProposalBtn) {
+    submitDiscoveryImageUrlProposalBtn.addEventListener('click', async () => {
+        const itemId = String(discoveryProposalTargetItemId || '').trim();
+        const imageUrl = String((discoveryProposedImageUrlInputEl && discoveryProposedImageUrlInputEl.value) || '').trim();
+        if (!itemId || !imageUrl) {
+            if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = 'Enter image URL first.';
+            return;
+        }
+        submitDiscoveryImageUrlProposalBtn.disabled = true;
+        if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = 'Creating image proposal...';
+        try {
+            const out = await postCreateDiscoveryProposal(itemId, { proposalType: 'image', imageUrl });
+            if (discoveryImageProposalPreviewEl && out && out.proposedImagePath) {
+                discoveryImageProposalPreviewEl.src = proposalImageSrc(out.proposedImagePath);
+                discoveryImageProposalPreviewEl.classList.remove('hidden');
+            }
+            await refreshDiscoveryProposalsForItem(itemId);
+            globalDiscoveriesExpandedId = itemId;
+            renderGlobalDiscoveriesPage();
+            if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = 'Vote started.';
+            setDiscoveryImageProposalModalOpen(false);
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = msg.slice(0, 200);
+        } finally {
+            submitDiscoveryImageUrlProposalBtn.disabled = false;
+        }
+    });
+}
+
+if (openDiscoveryImageUploadProposalBtn && discoveryProposedImageFileInputEl) {
+    openDiscoveryImageUploadProposalBtn.addEventListener('click', () => {
+        discoveryProposedImageFileInputEl.click();
+    });
+    discoveryProposedImageFileInputEl.addEventListener('change', async () => {
+        const file = discoveryProposedImageFileInputEl.files && discoveryProposedImageFileInputEl.files[0];
+        const itemId = String(discoveryProposalTargetItemId || '').trim();
+        if (!file || !itemId) return;
+        const valid = validateDiscoveryUploadFile(file);
+        if (!valid.ok) {
+            if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = valid.message;
+            return;
+        }
+        openDiscoveryImageUploadProposalBtn.disabled = true;
+        if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = 'Uploading and creating vote...';
+        try {
+            const imageDataUrl = await fileToDataUrl(file);
+            const out = await postCreateDiscoveryProposal(itemId, { proposalType: 'image', imageDataUrl });
+            if (discoveryImageProposalPreviewEl && out && out.proposedImagePath) {
+                discoveryImageProposalPreviewEl.src = proposalImageSrc(out.proposedImagePath);
+                discoveryImageProposalPreviewEl.classList.remove('hidden');
+            }
+            await refreshDiscoveryProposalsForItem(itemId);
+            globalDiscoveriesExpandedId = itemId;
+            renderGlobalDiscoveriesPage();
+            if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = 'Vote started.';
+            setDiscoveryImageProposalModalOpen(false);
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            if (discoveryImageProposalStatusEl) discoveryImageProposalStatusEl.textContent = msg.slice(0, 200);
+        } finally {
+            openDiscoveryImageUploadProposalBtn.disabled = false;
+            discoveryProposedImageFileInputEl.value = '';
+        }
     });
 }
 
@@ -3256,6 +4105,18 @@ if (upgradesModalEl) {
 }
 window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    if (discoveryImageProposalModalEl && !discoveryImageProposalModalEl.classList.contains('hidden')) {
+        setDiscoveryImageProposalModalOpen(false);
+        return;
+    }
+    if (discoveryNameProposalModalEl && !discoveryNameProposalModalEl.classList.contains('hidden')) {
+        setDiscoveryNameProposalModalOpen(false);
+        return;
+    }
+    if (discoveryVoteOptionsModalEl && !discoveryVoteOptionsModalEl.classList.contains('hidden')) {
+        setDiscoveryVoteOptionsModalOpen(false);
+        return;
+    }
     if (globalDiscoveriesModalEl && !globalDiscoveriesModalEl.classList.contains('hidden')) {
         setGlobalDiscoveriesModalOpen(false);
         return;
@@ -3462,6 +4323,9 @@ if (authLogoutBtn) {
         const oldToken = state.auth.token;
         state.auth.token = '';
         state.auth.username = '';
+        state.pendingDiscoveryNotice = null;
+        state.pendingCombination = null;
+        updateFloatingDiscoveryAlert(false);
         applyLoggedInUi();
         storeSessionToken('');
         stopFactoryPushLoop();
@@ -3517,6 +4381,7 @@ function handleTouchStartFromLibrary(e, item) {
 
 async function bootAfterAuth() {
     await loadGameData();
+    updateFloatingDiscoveryAlert(false);
     recomputeAllTiers();
     renderLibrary();
     renderCanvas();

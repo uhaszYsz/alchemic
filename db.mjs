@@ -33,6 +33,57 @@ function migrateItemsDiscoveredAt(db) {
     }
 }
 
+function migrateItemsNameColor(db) {
+    const cols = db.prepare('PRAGMA table_info(items)').all();
+    if (!cols.some((c) => c.name === 'name_color')) {
+        db.exec('ALTER TABLE items ADD COLUMN name_color TEXT');
+    }
+}
+
+function migrateItemsVotes(db) {
+    const cols = db.prepare('PRAGMA table_info(items)').all();
+    if (!cols.some((c) => c.name === 'upvotes')) {
+        db.exec('ALTER TABLE items ADD COLUMN upvotes INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!cols.some((c) => c.name === 'downvotes')) {
+        db.exec('ALTER TABLE items ADD COLUMN downvotes INTEGER NOT NULL DEFAULT 0');
+    }
+}
+
+function migrateItemsUniqueName(db) {
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_items_name_unique_nocase ON items(name COLLATE NOCASE)');
+}
+
+function migrateDiscoveryProposalTables(db) {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS discovery_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id TEXT NOT NULL,
+            proposal_type TEXT NOT NULL,
+            proposed_name TEXT,
+            proposed_image_path TEXT,
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(item_id) REFERENCES items(id),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS discovery_proposal_votes (
+            proposal_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            vote_value INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (proposal_id, user_id),
+            FOREIGN KEY(proposal_id) REFERENCES discovery_proposals(id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_discovery_proposals_item_created
+            ON discovery_proposals(item_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_discovery_proposal_votes_proposal
+            ON discovery_proposal_votes(proposal_id);
+    `);
+}
+
 export function openDb() {
     const db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
@@ -41,10 +92,13 @@ export function openDb() {
             id TEXT PRIMARY KEY NOT NULL,
             emoji TEXT NOT NULL,
             name TEXT NOT NULL,
+            name_color TEXT,
             ingredient_a TEXT,
             ingredient_b TEXT,
             discovered_by INTEGER,
-            discovered_at TEXT
+            discovered_at TEXT,
+            upvotes INTEGER NOT NULL DEFAULT 0,
+            downvotes INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS rejectedCrafts (
             item_a_id TEXT NOT NULL,
@@ -77,6 +131,10 @@ export function openDb() {
     migrateItemsIconPath(db);
     migrateItemsDiscoveredBy(db);
     migrateItemsDiscoveredAt(db);
+    migrateItemsNameColor(db);
+    migrateItemsVotes(db);
+    migrateItemsUniqueName(db);
+    migrateDiscoveryProposalTables(db);
     const n = db.prepare('SELECT COUNT(*) AS c FROM items').get().c;
     if (n === 0) {
         const ins = db.prepare(
@@ -92,16 +150,19 @@ export function openDb() {
     return db;
 }
 
-/** @returns {Record<string, { emoji: string, name: string, a?: string, b?: string, iconPath?: string, discoveredBy?: number, discoveredAt?: string }>} */
+/** @returns {Record<string, { emoji: string, name: string, nameColor?: string, a?: string, b?: string, iconPath?: string, discoveredBy?: number, discoveredAt?: string, upvotes?: number, downvotes?: number }>} */
 export function getItemsMap(db) {
     const rows = db
         .prepare(
-            'SELECT id, emoji, name, ingredient_a AS a, ingredient_b AS b, icon_path, discovered_by, discovered_at FROM items ORDER BY id'
+            'SELECT id, emoji, name, name_color, ingredient_a AS a, ingredient_b AS b, icon_path, discovered_by, discovered_at, upvotes, downvotes FROM items ORDER BY id'
         )
         .all();
     const out = {};
     for (const row of rows) {
         const entry = { emoji: row.emoji, name: row.name };
+        if (row.name_color != null && row.name_color !== '') {
+            entry.nameColor = String(row.name_color);
+        }
         if (row.a != null && row.b != null && row.a !== '' && row.b !== '') {
             entry.a = row.a;
             entry.b = row.b;
@@ -115,6 +176,12 @@ export function getItemsMap(db) {
         if (row.discovered_at != null && row.discovered_at !== '') {
             entry.discoveredAt = String(row.discovered_at);
         }
+        if (row.upvotes != null && Number(row.upvotes) > 0) {
+            entry.upvotes = Number(row.upvotes) | 0;
+        }
+        if (row.downvotes != null && Number(row.downvotes) > 0) {
+            entry.downvotes = Number(row.downvotes) | 0;
+        }
         out[row.id] = entry;
     }
     return out;
@@ -123,16 +190,22 @@ export function getItemsMap(db) {
 /**
  * Insert or update a catalog item (discoveries). Preserves existing icon_path when not provided.
  * @param {import('better-sqlite3').Database} db
- * @param {{ id: string, emoji: string, name: string, ingredient_a: string, ingredient_b: string, discovered_by?: number | null, discovered_at?: string | null }} row
+ * @param {{ id: string, emoji: string, name: string, name_color?: string | null, ingredient_a: string, ingredient_b: string, discovered_by?: number | null, discovered_at?: string | null }} row
  */
 export function upsertItem(db, row) {
-    const { id, emoji, name, ingredient_a, ingredient_b, discovered_by, discovered_at } = row;
+    const { id, emoji, name, name_color, ingredient_a, ingredient_b, discovered_by, discovered_at } = row;
+    const normalizedName = String(name || '').trim();
+    const normalizedColor =
+        typeof name_color === 'string' && /^#[0-9a-fA-F]{6}$/.test(name_color.trim())
+            ? name_color.trim().toLowerCase()
+            : null;
     db.prepare(
-        `INSERT INTO items (id, emoji, name, ingredient_a, ingredient_b, discovered_by, discovered_at)
-         VALUES (@id, @emoji, @name, @ingredient_a, @ingredient_b, @discovered_by, @discovered_at)
+        `INSERT INTO items (id, emoji, name, name_color, ingredient_a, ingredient_b, discovered_by, discovered_at)
+         VALUES (@id, @emoji, @name, @name_color, @ingredient_a, @ingredient_b, @discovered_by, @discovered_at)
          ON CONFLICT(id) DO UPDATE SET
            emoji = excluded.emoji,
            name = excluded.name,
+           name_color = excluded.name_color,
            ingredient_a = excluded.ingredient_a,
            ingredient_b = excluded.ingredient_b,
            discovered_by = COALESCE(items.discovered_by, excluded.discovered_by),
@@ -140,12 +213,27 @@ export function upsertItem(db, row) {
     ).run({
         id,
         emoji,
-        name,
+        name: normalizedName,
+        name_color: normalizedColor,
         ingredient_a,
         ingredient_b,
         discovered_by: discovered_by ?? null,
         discovered_at: discovered_at ?? null
     });
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} name
+ * @returns {{ id: string } | null}
+ */
+export function findItemByName(db, name) {
+    const normalized = String(name || '').trim();
+    if (!normalized) return null;
+    const row = db
+        .prepare('SELECT id FROM items WHERE name = ? COLLATE NOCASE LIMIT 1')
+        .get(normalized);
+    return row || null;
 }
 
 /**
@@ -158,6 +246,186 @@ export function setItemIconPath(db, id, iconPathRelative) {
         p: iconPathRelative,
         id: String(id)
     });
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @returns {boolean}
+ */
+function isVoteWindowDiscoveryItem(db, itemId) {
+    const row = db
+        .prepare(
+            `SELECT id
+             FROM items
+             WHERE id = ?
+               AND ingredient_a IS NOT NULL AND ingredient_a != ''
+               AND ingredient_b IS NOT NULL AND ingredient_b != ''
+               AND discovered_at IS NOT NULL AND discovered_at != ''
+               AND (julianday('now') - julianday(discovered_at)) <= 5
+             LIMIT 1`
+        )
+        .get(String(itemId || '').trim());
+    return !!row;
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ itemId: string, proposalType: 'name'|'image', proposedName?: string | null, proposedImagePath?: string | null, createdBy: number }} input
+ * @returns {{ id: number } | null}
+ */
+export function createDiscoveryProposal(db, input) {
+    const itemId = String(input.itemId || '').trim();
+    const proposalType = input.proposalType === 'image' ? 'image' : input.proposalType === 'name' ? 'name' : '';
+    const proposedName =
+        proposalType === 'name' && typeof input.proposedName === 'string' ? String(input.proposedName).trim() : null;
+    const proposedImagePath =
+        proposalType === 'image' && typeof input.proposedImagePath === 'string'
+            ? String(input.proposedImagePath).trim()
+            : null;
+    if (!itemId || !proposalType) return null;
+    if (proposalType === 'name' && !proposedName) return null;
+    if (proposalType === 'image' && !proposedImagePath) return null;
+    if (!isVoteWindowDiscoveryItem(db, itemId)) return null;
+    const out = db
+        .prepare(
+            `INSERT INTO discovery_proposals (item_id, proposal_type, proposed_name, proposed_image_path, created_by)
+             VALUES (@item_id, @proposal_type, @proposed_name, @proposed_image_path, @created_by)`
+        )
+        .run({
+            item_id: itemId,
+            proposal_type: proposalType,
+            proposed_name: proposedName,
+            proposed_image_path: proposedImagePath,
+            created_by: Number(input.createdBy)
+        });
+    return { id: Number(out.lastInsertRowid) };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} proposalId
+ * @param {number} userId
+ * @param {'up'|'down'} direction
+ * @returns {{ upvotes: number, downvotes: number, myVote: number } | null}
+ */
+export function voteOnDiscoveryProposal(db, proposalId, userId, direction) {
+    const dir = direction === 'down' ? -1 : direction === 'up' ? 1 : 0;
+    if (!dir) return null;
+    const p = db
+        .prepare(
+            `SELECT p.id
+             FROM discovery_proposals p
+             JOIN items i ON i.id = p.item_id
+             WHERE p.id = ?
+               AND i.ingredient_a IS NOT NULL AND i.ingredient_a != ''
+               AND i.ingredient_b IS NOT NULL AND i.ingredient_b != ''
+               AND i.discovered_at IS NOT NULL AND i.discovered_at != ''
+               AND (julianday('now') - julianday(i.discovered_at)) <= 5
+             LIMIT 1`
+        )
+        .get(Number(proposalId));
+    if (!p) return null;
+    db.prepare(
+        `INSERT INTO discovery_proposal_votes (proposal_id, user_id, vote_value, created_at, updated_at)
+         VALUES (@proposal_id, @user_id, @vote_value, datetime('now'), datetime('now'))
+         ON CONFLICT(proposal_id, user_id) DO UPDATE SET
+            vote_value = excluded.vote_value,
+            updated_at = datetime('now')`
+    ).run({
+        proposal_id: Number(proposalId),
+        user_id: Number(userId),
+        vote_value: dir
+    });
+    const agg = db
+        .prepare(
+            `SELECT
+                SUM(CASE WHEN vote_value = 1 THEN 1 ELSE 0 END) AS upvotes,
+                SUM(CASE WHEN vote_value = -1 THEN 1 ELSE 0 END) AS downvotes
+             FROM discovery_proposal_votes
+             WHERE proposal_id = ?`
+        )
+        .get(Number(proposalId));
+    return {
+        upvotes: Number((agg && agg.upvotes) || 0) | 0,
+        downvotes: Number((agg && agg.downvotes) || 0) | 0,
+        myVote: dir
+    };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @param {number} userId
+ * @returns {{ id: number, itemId: string, proposalType: 'name'|'image', proposedName?: string, proposedImagePath?: string, createdBy: number, createdAt: string, upvotes: number, downvotes: number, myVote: number }[]}
+ */
+export function listDiscoveryProposalsByItem(db, itemId, userId) {
+    const rows = db
+        .prepare(
+            `SELECT
+                p.id,
+                p.item_id,
+                p.proposal_type,
+                p.proposed_name,
+                p.proposed_image_path,
+                p.created_by,
+                p.created_at,
+                COALESCE(SUM(CASE WHEN v.vote_value = 1 THEN 1 ELSE 0 END), 0) AS upvotes,
+                COALESCE(SUM(CASE WHEN v.vote_value = -1 THEN 1 ELSE 0 END), 0) AS downvotes,
+                COALESCE(MAX(CASE WHEN v.user_id = @uid THEN v.vote_value ELSE 0 END), 0) AS my_vote
+             FROM discovery_proposals p
+             LEFT JOIN discovery_proposal_votes v ON v.proposal_id = p.id
+             WHERE p.item_id = @item_id
+             GROUP BY p.id
+             ORDER BY p.created_at DESC, p.id DESC`
+        )
+        .all({ item_id: String(itemId || '').trim(), uid: Number(userId) });
+    return rows.map((row) => {
+        const out = {
+            id: Number(row.id),
+            itemId: String(row.item_id),
+            proposalType: row.proposal_type === 'image' ? 'image' : 'name',
+            createdBy: Number(row.created_by),
+            createdAt: String(row.created_at),
+            upvotes: Number(row.upvotes || 0) | 0,
+            downvotes: Number(row.downvotes || 0) | 0,
+            myVote: Number(row.my_vote || 0) | 0
+        };
+        if (row.proposed_name) out.proposedName = String(row.proposed_name);
+        if (row.proposed_image_path) out.proposedImagePath = String(row.proposed_image_path);
+        return out;
+    });
+}
+
+/**
+ * Increment upvote/downvote counters for recent discoveries (<= 5 days old).
+ * Returns null when item not found / too old / not a discovery.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} id
+ * @param {'up' | 'down'} direction
+ * @returns {{ upvotes: number, downvotes: number } | null}
+ */
+export function voteOnItem(db, id, direction) {
+    const dir = direction === 'down' ? 'down' : 'up';
+    const result = db
+        .prepare(
+            `UPDATE items
+             SET upvotes = upvotes + CASE WHEN @dir = 'up' THEN 1 ELSE 0 END,
+                 downvotes = downvotes + CASE WHEN @dir = 'down' THEN 1 ELSE 0 END
+             WHERE id = @id
+               AND ingredient_a IS NOT NULL AND ingredient_a != ''
+               AND ingredient_b IS NOT NULL AND ingredient_b != ''
+               AND discovered_at IS NOT NULL AND discovered_at != ''
+               AND (julianday('now') - julianday(discovered_at)) <= 5`
+        )
+        .run({ id: String(id || '').trim(), dir });
+    if (!result || result.changes < 1) return null;
+    const row = db.prepare('SELECT upvotes, downvotes FROM items WHERE id = ?').get(String(id || '').trim());
+    if (!row) return null;
+    return {
+        upvotes: Number(row.upvotes || 0) | 0,
+        downvotes: Number(row.downvotes || 0) | 0
+    };
 }
 
 /**

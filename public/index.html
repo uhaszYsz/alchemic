@@ -128,6 +128,46 @@
         .floating-right .floating-btn:active {
             transform: scale(0.98);
         }
+        @keyframes discovery-btn-blink {
+            0%, 100% {
+                transform: scale(1);
+                box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
+                border-color: rgba(217, 119, 6, 0.9);
+            }
+            50% {
+                transform: scale(1.1);
+                box-shadow: 0 0 0 10px rgba(251, 191, 36, 0.22), 0 14px 28px rgba(0, 0, 0, 0.45);
+                border-color: rgba(251, 191, 36, 1);
+            }
+        }
+        .discovery-alert-btn {
+            min-height: 46px;
+            min-width: 46px;
+            padding: 0.5rem 0.7rem;
+            border-radius: 9999px;
+            border: 1px solid rgba(217, 119, 6, 0.9);
+            background: rgba(120, 53, 15, 0.92);
+            color: rgb(253, 230, 138);
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(8px);
+            font-size: 1rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .discovery-alert-btn.is-blinking {
+            animation: discovery-btn-blink 0.45s ease-in-out 4;
+        }
+        .discovery-color-swatch {
+            width: 100%;
+            aspect-ratio: 1;
+            border-radius: 0.45rem;
+            border: 1px solid rgba(148, 163, 184, 0.45);
+        }
+        .discovery-color-swatch.is-selected {
+            outline: 2px solid rgba(255, 255, 255, 0.92);
+            outline-offset: 1px;
+            border-color: rgba(255, 255, 255, 0.92);
+        }
         .floating-left-tabs {
             position: fixed;
             left: max(0.5rem, env(safe-area-inset-left, 0px));
@@ -290,6 +330,11 @@
         <button type="button" id="tab-lab" class="floating-bullet-btn touch-manipulation is-active">Lab</button>
         <button type="button" id="tab-factory" class="floating-bullet-btn touch-manipulation">Factory</button>
     </div>
+    <div id="floating-discovery-alert" class="hidden fixed right-[max(0.5rem,env(safe-area-inset-right,0px))] top-[max(4.1rem,env(safe-area-inset-top,0px))] z-[46]">
+        <button type="button" id="open-latest-discovery" class="discovery-alert-btn touch-manipulation" title="Open latest discovery">
+            ✨ <span id="floating-discovery-alert-count" class="text-[11px] align-top">1</span>
+        </button>
+    </div>
     <div id="floating-clear-workspace" class="floating-right">
         <button id="clear-btn" class="floating-btn touch-manipulation">Clear</button>
     </div>
@@ -392,6 +437,70 @@
         </div>
     </div>
 
+    <div id="discovery-vote-options-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[55] backdrop-blur-sm px-3">
+        <div class="bg-slate-800 rounded-2xl border border-slate-600 shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">
+                <h2 class="text-sm font-bold text-slate-200">Start Vote Proposal</h2>
+                <button type="button" id="close-discovery-vote-options" class="min-h-[40px] px-3 py-2 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-sm font-semibold">
+                    Close
+                </button>
+            </div>
+            <div class="p-4 grid grid-cols-1 gap-2">
+                <button type="button" id="open-discovery-name-proposal" class="min-h-[44px] px-3 py-2 rounded-lg bg-blue-700 border border-blue-600 text-blue-100 text-sm font-semibold">
+                    Change name
+                </button>
+                <button type="button" id="open-discovery-image-proposal" class="min-h-[44px] px-3 py-2 rounded-lg bg-violet-700 border border-violet-600 text-violet-100 text-sm font-semibold">
+                    Change image
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="discovery-name-proposal-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[56] backdrop-blur-sm px-3">
+        <div class="bg-slate-800 rounded-2xl border border-slate-600 shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">
+                <h2 class="text-sm font-bold text-slate-200">Propose Name Change</h2>
+                <button type="button" id="close-discovery-name-proposal" class="min-h-[40px] px-3 py-2 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-sm font-semibold">
+                    Close
+                </button>
+            </div>
+            <div class="p-4 space-y-3">
+                <input id="discovery-proposed-name-input" type="text" maxlength="40" placeholder="Proposed new name" class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100" />
+                <p id="discovery-name-proposal-status" class="text-xs text-slate-400 min-h-[1rem]"></p>
+                <button type="button" id="submit-discovery-name-proposal" class="w-full min-h-[44px] px-3 py-2 rounded-lg bg-blue-700 border border-blue-600 text-blue-100 text-sm font-semibold">
+                    Start vote
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="discovery-image-proposal-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[56] backdrop-blur-sm px-3">
+        <div class="bg-slate-800 rounded-2xl border border-slate-600 shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">
+                <h2 class="text-sm font-bold text-slate-200">Propose Image Change</h2>
+                <button type="button" id="close-discovery-image-proposal" class="min-h-[40px] px-3 py-2 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-sm font-semibold">
+                    Close
+                </button>
+            </div>
+            <div class="p-4 space-y-3">
+                <div class="flex gap-2">
+                    <input id="discovery-proposed-image-url" type="url" placeholder="https://example.com/icon.gif" class="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-100" />
+                    <button type="button" id="submit-discovery-image-url-proposal" class="min-h-[40px] px-3 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-sm font-semibold">
+                        Use URL
+                    </button>
+                </div>
+                <div class="flex gap-2">
+                    <button type="button" id="open-discovery-image-upload-proposal" class="min-h-[40px] px-3 rounded-lg bg-violet-700 border border-violet-600 text-violet-100 text-sm font-semibold">
+                        Upload
+                    </button>
+                    <input id="discovery-proposed-image-file" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" class="hidden" />
+                </div>
+                <p id="discovery-image-proposal-status" class="text-xs text-slate-400 min-h-[1rem]"></p>
+                <img id="discovery-image-proposal-preview" class="hidden w-24 h-24 object-contain rounded border border-slate-600 bg-slate-900/70 p-1" alt="Proposed image preview" />
+            </div>
+        </div>
+    </div>
+
     <!-- Pre-discovery: loading AI name ideas (no “New Discovery!” yet) -->
     <div id="discovery-check-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-[60] backdrop-blur-sm px-4" aria-live="polite">
         <div class="bg-slate-800/95 border border-slate-600 rounded-2xl shadow-2xl max-w-sm w-full p-6 text-center">
@@ -416,6 +525,27 @@
                         <span class="block text-[11px] uppercase tracking-wide text-slate-400 mb-1">Name</span>
                         <input id="discovery-name-input" type="text" maxlength="40" placeholder="Type your own name or tap suggestion" class="w-full bg-slate-800/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
                     </label>
+                </div>
+                <div>
+                    <span class="block text-[11px] uppercase tracking-wide text-slate-400 mb-1">Name color</span>
+                    <div id="discovery-name-color-grid" class="grid grid-cols-10 gap-1.5">
+                        <!-- 20 color swatches injected by JS -->
+                    </div>
+                </div>
+                <div class="pt-1">
+                    <span class="block text-[11px] uppercase tracking-wide text-slate-400 mb-1">Icon image</span>
+                    <div class="flex gap-2">
+                        <input id="discovery-icon-url" type="url" placeholder="https://example.com/icon.png" class="flex-1 bg-slate-800/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
+                        <button id="discovery-apply-icon-url" class="py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold rounded-lg transition">
+                            Load URL
+                        </button>
+                        <button id="discovery-upload-icon-btn" class="py-2.5 px-3 bg-blue-700 hover:bg-blue-600 text-blue-100 text-sm font-semibold rounded-lg transition">
+                            Upload
+                        </button>
+                        <input id="discovery-upload-icon-file" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" class="hidden" />
+                    </div>
+                    <p id="discovery-ai-image-status" class="text-xs text-slate-400 mt-2 min-h-[1rem]"></p>
+                    <img id="discovery-ai-image-img" class="hidden mt-2 rounded border border-slate-600 bg-slate-900/70 p-1" alt="Icon preview" />
                 </div>
                 <div class="flex gap-3 pt-2">
                     <button id="cancel-discovery" class="flex-1 py-3 bg-slate-700 hover:bg-slate-600 text-slate-300 font-bold rounded-lg transition transform active:scale-95">
