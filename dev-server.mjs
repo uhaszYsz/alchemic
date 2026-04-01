@@ -405,7 +405,7 @@ function factoryRuntimeStatus(state, now = Date.now()) {
 
 function factoryStep(state) {
     const out = simulateFactoryStep(state, {
-        inBounds: (col, row) => factoryInBounds(state, col, row),
+        inBounds: (col, row) => Number.isFinite(col) && Number.isFinite(row),
         getResourceId: (col, row) => factoryCellResourceId(state, col, row),
         getTransporterDir: (key) => factoryTransporterDir(state, key),
         getCombinerDir: (key) => factoryCombinerDir(state, key),
