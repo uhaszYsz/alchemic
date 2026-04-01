@@ -2761,12 +2761,8 @@ function setWorkspace(which) {
         floatingUpgrades.classList.toggle('hidden', isLab);
     }
     if (tabLabBtn && tabFactoryBtn) {
-        tabLabBtn.className =
-            'flex-1 py-2 px-3 rounded-lg text-sm font-semibold transition ' +
-            (isLab ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600');
-        tabFactoryBtn.className =
-            'flex-1 py-2 px-3 rounded-lg text-sm font-semibold transition ' +
-            (!isLab ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600');
+        tabLabBtn.classList.toggle('is-active', isLab);
+        tabFactoryBtn.classList.toggle('is-active', !isLab);
     }
     if (panelLabEl && panelFactoryEl) {
         panelLabEl.classList.toggle('hidden', !isLab);
@@ -2844,7 +2840,9 @@ function createElementOnCanvas(data, x, y) {
 
 function renderCanvas() {
     const instruction = document.getElementById('instruction');
-    instruction.style.display = state.activeElements.length > 0 ? 'none' : 'flex';
+    if (instruction) {
+        instruction.style.display = state.activeElements.length > 0 ? 'none' : 'flex';
+    }
 
     const existingUids = new Set(state.activeElements.map(e => e.uid));
 
