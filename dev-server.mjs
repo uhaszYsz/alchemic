@@ -408,45 +408,6 @@ function factoryRuntimeStatus(state, now = Date.now()) {
 }
 
 function factoryStep(state, userId = 0) {
-    console.log(
-        `[factory-step] ts=${new Date().toISOString()} user=${Number(userId) | 0} loopTick=${(Number(state.loopTick || 0) | 0) + 1}`
-    );
-    try {
-        const combinerRows = [];
-        const placements = state && state.placements && typeof state.placements === 'object' ? state.placements : {};
-        const cellItems = state && state.cellItems && typeof state.cellItems === 'object' ? state.cellItems : {};
-        for (const [key, building] of Object.entries(placements)) {
-            if (building !== 'combiner') continue;
-            const pos = factoryKeyToColRow(key);
-            const outDir = factoryCombinerDir(state, key);
-            const leftInDir = (outDir + 1) % 4;
-            const rightInDir = (outDir + 3) % 4;
-            const outPos = factoryNeighborColRow(pos.col, pos.row, outDir);
-            const leftPos = factoryNeighborColRow(pos.col, pos.row, leftInDir);
-            const rightPos = factoryNeighborColRow(pos.col, pos.row, rightInDir);
-            const outKey = factoryPlacementKey(outPos.col, outPos.row);
-            const leftKey = factoryPlacementKey(leftPos.col, leftPos.row);
-            const rightKey = factoryPlacementKey(rightPos.col, rightPos.row);
-            combinerRows.push({
-                key,
-                dir: outDir,
-                buffered: String(cellItems[key] || ''),
-                outKey,
-                outItem: String(cellItems[outKey] || ''),
-                leftKey,
-                leftItem: String(cellItems[leftKey] || ''),
-                rightKey,
-                rightItem: String(cellItems[rightKey] || '')
-            });
-        }
-        console.log(
-            `[factory-combiner-state] ts=${new Date().toISOString()} user=${Number(userId) | 0} state=${JSON.stringify(combinerRows)}`
-        );
-    } catch (err) {
-        console.warn(
-            `[factory-combiner-state] ts=${new Date().toISOString()} user=${Number(userId) | 0} err=${String(err && err.message ? err.message : err)}`
-        );
-    }
     const out = simulateFactoryStep(state, {
         inBounds: (col, row) => Number.isFinite(col) && Number.isFinite(row),
         getResourceId: (col, row) => factoryCellResourceId(state, col, row),
