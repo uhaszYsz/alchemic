@@ -77,8 +77,10 @@ const state = {
         /** Camera zoom multiplier (1 = default). */
         cameraZoom: 1
     },
-    /** Last OpenAI image URL in discovery modal (before saving to disk) */
+    /** Last icon URL chosen in discovery modal (before saving). */
     discoveryPreviewUrl: '',
+    /** Uploaded custom icon as data URL (before saving). */
+    discoveryPreviewDataUrl: '',
     /** Item id for which we are generating / saving an icon */
     discoveryIconItemId: '',
     /** Filled when moving to icon step — for image prompt (name was cleared from picker state) */
@@ -2338,6 +2340,10 @@ const aiReplyWrap = document.getElementById('ai-reply-wrap');
 const aiReplyFullEl = document.getElementById('ai-reply-full');
 const aiSuggestionsEl = document.getElementById('ai-suggestions');
 const discoveryAiImageBtn = document.getElementById('discovery-ai-image-btn');
+const discoveryOpenCustomIconBtn = document.getElementById('discovery-open-custom-icon');
+const discoveryCustomIconModal = document.getElementById('discovery-custom-icon-modal');
+const discoveryCustomIconCloseBtn = document.getElementById('close-discovery-custom-icon');
+const discoveryCustomIconOkBtn = document.getElementById('discovery-custom-icon-ok');
 const discoveryTakeIconBtn = document.getElementById('discovery-take-icon');
 const discoveryIconUrlInput = document.getElementById('discovery-icon-url');
 const discoveryApplyIconUrlBtn = document.getElementById('discovery-apply-icon-url');
@@ -2352,6 +2358,7 @@ const discoveryAiImageQueryInput = /** @type {HTMLInputElement | null} */ (docum
 const discoveryAiImagePrevBtn = document.getElementById('discovery-ai-image-prev');
 const discoveryAiImageNextBtn = document.getElementById('discovery-ai-image-next');
 const discoveryAiImagePageEl = document.getElementById('discovery-ai-image-page');
+const discoveryCustomIconStatus = document.getElementById('discovery-custom-icon-status');
 const saveDiscoveryBtn = document.getElementById('save-discovery');
 const rejectDiscoveryBtn = document.getElementById('reject-discovery');
 const discoveryNameInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-name-input'));
@@ -2488,6 +2495,7 @@ function syncDiscoveryImagePagerUi() {
  */
 function selectDiscoveryAiCandidate(url, selectedBtn) {
     state.discoveryPreviewUrl = url;
+    state.discoveryPreviewDataUrl = '';
     if (discoveryAiImageImg) {
         discoveryAiImageImg.src = url;
         discoveryAiImageImg.classList.remove('hidden');
@@ -2503,6 +2511,24 @@ function selectDiscoveryAiCandidate(url, selectedBtn) {
         btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = false;
+}
+
+function unselectDiscoveryAiCandidate() {
+    state.discoveryPreviewUrl = '';
+    state.discoveryPreviewDataUrl = '';
+    if (discoveryAiImageImg) {
+        discoveryAiImageImg.removeAttribute('src');
+        discoveryAiImageImg.classList.add('hidden');
+    }
+    if (discoveryAiImageGridEl) {
+        const choices = discoveryAiImageGridEl.querySelectorAll('.discovery-ai-image-choice');
+        choices.forEach((btn) => {
+            btn.classList.remove('ring-2', 'ring-blue-400', 'border-blue-500');
+            btn.classList.add('border-slate-600');
+            btn.setAttribute('aria-pressed', 'false');
+        });
+    }
+    if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
 }
 
 /**
@@ -2524,8 +2550,6 @@ function renderDiscoveryAiCandidates(urls) {
         if (img) img.src = u;
         btn.classList.remove('hidden');
     });
-    const first = choices[0];
-    if (first && list[0]) selectDiscoveryAiCandidate(list[0], first);
 }
 
 if (discoveryAiImageGridEl) {
@@ -2536,12 +2560,19 @@ if (discoveryAiImageGridEl) {
         if (!btn || btn.classList.contains('hidden')) return;
         const img = btn.querySelector('img');
         const u = img && img.getAttribute('src');
-        if (u) selectDiscoveryAiCandidate(u, /** @type {HTMLElement} */ (btn));
+        if (!u) return;
+        const isSelected = btn.getAttribute('aria-pressed') === 'true' && state.discoveryPreviewUrl === u;
+        if (isSelected) {
+            unselectDiscoveryAiCandidate();
+            return;
+        }
+        selectDiscoveryAiCandidate(u, /** @type {HTMLElement} */ (btn));
     });
 }
 
 function resetDiscoveryAiImagePreview() {
     state.discoveryPreviewUrl = '';
+    state.discoveryPreviewDataUrl = '';
     state.discoveryIconItemId = '';
     lastAutoIconSearchQuery = '';
     discoveryIconSearchPage = 0;
@@ -2553,7 +2584,9 @@ function resetDiscoveryAiImagePreview() {
     if (discoveryIconUrlInput) discoveryIconUrlInput.value = '';
     if (discoveryAiImageQueryInput) discoveryAiImageQueryInput.value = '';
     if (discoveryUploadIconFileInput) discoveryUploadIconFileInput.value = '';
+    if (discoveryCustomIconModal) discoveryCustomIconModal.classList.add('hidden');
     if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = '';
+    if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = '';
     syncDiscoveryImagePagerUi();
     clearDiscoveryAiImageGrid();
     if (discoveryAiImageImg) {
@@ -2565,7 +2598,7 @@ function resetDiscoveryAiImagePreview() {
 /** @returns {string} */
 function defaultDiscoveryImageQueryFromName() {
     const itemName = getDiscoveryChosenName() || (state.discoveryIconItemName || '').trim() || 'item';
-    return `${itemName} icon`;
+    return `${itemName} isometric`;
 }
 
 /** @returns {string} */
@@ -2594,11 +2627,7 @@ async function generateDiscoveryIconPreview(targetPage) {
     if (discoveryAiImagePrevBtn) discoveryAiImagePrevBtn.disabled = true;
     if (discoveryAiImageNextBtn) discoveryAiImageNextBtn.disabled = true;
     if (discoveryAiImageStatus) {
-        discoveryAiImageStatus.textContent = 'Searching icons…';
-    }
-    if (discoveryAiImageImg) {
-        discoveryAiImageImg.classList.add('hidden');
-        discoveryAiImageImg.removeAttribute('src');
+        discoveryAiImageStatus.textContent = 'Searching isometric images…';
     }
     clearDiscoveryAiImageGrid();
     try {
@@ -2612,9 +2641,8 @@ async function generateDiscoveryIconPreview(targetPage) {
         if (!urls.length) throw new Error('No image URLs in response');
         discoveryIconSearchPage = page;
         discoveryIconSearchLastCount = urls.length;
-        renderDiscoveryAiCandidates(urls);
         if (discoveryAiImageStatus) {
-            discoveryAiImageStatus.textContent = 'Select one image, then Confirm discovery to save it.';
+            discoveryAiImageStatus.textContent = `Found ${urls.length} images. Search results are hidden; use Custom icon to choose URL/upload.`;
         }
     } catch (err) {
         let msg = err && typeof err.message === 'string' ? err.message : String(err);
@@ -2622,7 +2650,7 @@ async function generateDiscoveryIconPreview(targetPage) {
         discoveryIconSearchLastCount = 0;
         clearDiscoveryAiImageGrid();
         if (discoveryAiImageStatus) {
-            discoveryAiImageStatus.textContent = `Icon search failed. ${msg.slice(0, 220)}`;
+            discoveryAiImageStatus.textContent = `Image search failed. ${msg.slice(0, 220)}`;
         }
     } finally {
         discoveryAiImageBtn.disabled = false;
@@ -2729,6 +2757,7 @@ async function saveDiscoveryAndStartIcon() {
 
     const itemId = String(pending.resultId || '');
     const selectedImageUrl = String(state.discoveryPreviewUrl || '').trim();
+    const selectedImageDataUrl = String(state.discoveryPreviewDataUrl || '').trim();
     state.discoveryIconItemName = text;
     state.discoveryIconItemId = itemId;
     state.pendingCombination = null;
@@ -2739,12 +2768,31 @@ async function saveDiscoveryAndStartIcon() {
     if (aiOutgoingWrap) aiOutgoingWrap.classList.add('hidden');
     if (aiOutgoingEl) aiOutgoingEl.textContent = '';
     state.discoveryPreviewUrl = '';
+    state.discoveryPreviewDataUrl = '';
     clearDiscoveryAiImageGrid();
     if (discoveryAiImageImg) {
         discoveryAiImageImg.removeAttribute('src');
         discoveryAiImageImg.classList.add('hidden');
     }
-    if (itemId && selectedImageUrl) {
+    if (itemId && selectedImageDataUrl) {
+        try {
+            const out = await postSaveItemIconRemote(itemId, '', {
+                strictUserUrl: true,
+                imageDataUrl: selectedImageDataUrl
+            });
+            if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
+                persistIconPathForItem(itemId, out.iconPath.trim());
+            }
+            await reloadCatalogFromApi();
+            if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Discovery and icon saved.';
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            if (discoveryAiImageStatus) {
+                discoveryAiImageStatus.textContent =
+                    `Discovery saved, icon upload failed: ${msg.slice(0, 180)}`;
+            }
+        }
+    } else if (itemId && selectedImageUrl) {
         try {
             const out = await postSaveItemIconRemote(itemId, selectedImageUrl);
             if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
@@ -2777,84 +2825,68 @@ async function saveDiscoveryAndStartIcon() {
 }
 
 async function applyDiscoveryIconFromUrl() {
-    const itemId = state.discoveryIconItemId;
     const raw = discoveryIconUrlInput ? discoveryIconUrlInput.value.trim() : '';
-    if (!itemId) {
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Confirm discovery first, then load icon URL.';
-        return;
-    }
     if (!raw) {
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Enter an image URL first.';
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = 'Enter an image URL first.';
         return;
     }
     let parsed;
     try {
         parsed = new URL(raw);
     } catch {
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'That URL is not valid.';
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = 'That URL is not valid.';
         return;
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Use an http or https image URL.';
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = 'Use an http or https image URL.';
         return;
     }
     if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = true;
-    if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Downloading…';
+    if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = 'Using URL...';
     try {
-        const out = await postSaveItemIconRemote(itemId, raw, { strictUserUrl: true });
-        state.discoveryPreviewUrl = '';
+        state.discoveryPreviewDataUrl = '';
+        state.discoveryPreviewUrl = raw;
         clearDiscoveryAiImageGrid();
-        if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
-            persistIconPathForItem(itemId, out.iconPath.trim());
-        }
-        await reloadCatalogFromApi();
-        if (discoveryAiImageImg && out.iconPath) {
-            discoveryAiImageImg.src = `${apiOrigin()}/${String(out.iconPath).replace(/^\/+/, '')}?t=${Date.now()}`;
+        if (discoveryAiImageImg) {
+            discoveryAiImageImg.src = raw;
             discoveryAiImageImg.classList.remove('hidden');
         }
-        if (discoveryAiImageStatus) {
-            discoveryAiImageStatus.textContent = 'Icon saved from URL. Tap Done when finished.';
+        if (discoveryCustomIconStatus) {
+            discoveryCustomIconStatus.textContent = 'Custom icon selected.';
         }
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Custom icon selected.';
         if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
     } catch (e) {
         const msg = e && typeof e.message === 'string' ? e.message : String(e);
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = msg.slice(0, 280);
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = msg.slice(0, 280);
     } finally {
         if (discoveryApplyIconUrlBtn) discoveryApplyIconUrlBtn.disabled = false;
     }
 }
 
 async function applyDiscoveryIconFromUpload(file) {
-    const itemId = state.discoveryIconItemId;
-    if (!itemId) {
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Confirm discovery first, then upload icon.';
-        return;
-    }
     const v = validateDiscoveryUploadFile(file);
     if (!v.ok) {
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = v.message;
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = v.message;
         return;
     }
     if (discoveryUploadIconBtn) discoveryUploadIconBtn.disabled = true;
-    if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Uploading…';
+    if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = 'Uploading...';
     try {
         const imageDataUrl = await fileToDataUrl(file);
-        const out = await postSaveItemIconRemote(itemId, '', { strictUserUrl: true, imageDataUrl });
+        state.discoveryPreviewDataUrl = imageDataUrl;
         state.discoveryPreviewUrl = '';
         clearDiscoveryAiImageGrid();
-        if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
-            persistIconPathForItem(itemId, out.iconPath.trim());
-        }
-        await reloadCatalogFromApi();
-        if (discoveryAiImageImg && out.iconPath) {
-            discoveryAiImageImg.src = `${apiOrigin()}/${String(out.iconPath).replace(/^\/+/, '')}?t=${Date.now()}`;
+        if (discoveryAiImageImg) {
+            discoveryAiImageImg.src = imageDataUrl;
             discoveryAiImageImg.classList.remove('hidden');
         }
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Icon uploaded. GIFs stay animated in icons.';
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = 'Custom upload selected.';
+        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = 'Custom icon selected.';
         if (discoveryTakeIconBtn) discoveryTakeIconBtn.disabled = true;
     } catch (e) {
         const msg = e && typeof e.message === 'string' ? e.message : String(e);
-        if (discoveryAiImageStatus) discoveryAiImageStatus.textContent = msg.slice(0, 280);
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = msg.slice(0, 280);
     } finally {
         if (discoveryUploadIconBtn) discoveryUploadIconBtn.disabled = false;
         if (discoveryUploadIconFileInput) discoveryUploadIconFileInput.value = '';
@@ -2974,7 +3006,7 @@ function renderAiSuggestions() {
         btn.appendChild(nameSpan);
         btn.addEventListener('click', () => {
             if (already) return;
-            setDiscoverySelectedName(propName, propEmoji, { autoSearchImages: true });
+            setDiscoverySelectedName(propName, propEmoji, { autoSearchImages: false });
         });
         aiSuggestionsEl.appendChild(btn);
     });
@@ -4495,6 +4527,28 @@ if (discoveryAiImageBtn) {
         void generateDiscoveryIconPreview(0);
     });
 }
+if (discoveryOpenCustomIconBtn) {
+    discoveryOpenCustomIconBtn.addEventListener('click', () => {
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = '';
+        if (discoveryCustomIconModal) discoveryCustomIconModal.classList.remove('hidden');
+    });
+}
+if (discoveryCustomIconCloseBtn) {
+    discoveryCustomIconCloseBtn.addEventListener('click', () => {
+        if (discoveryCustomIconModal) discoveryCustomIconModal.classList.add('hidden');
+    });
+}
+if (discoveryCustomIconOkBtn) {
+    discoveryCustomIconOkBtn.addEventListener('click', () => {
+        const hasCustomIcon = !!String(state.discoveryPreviewUrl || '').trim() || !!String(state.discoveryPreviewDataUrl || '').trim();
+        if (!hasCustomIcon) {
+            if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = 'Pick icon URL or upload first.';
+            return;
+        }
+        if (discoveryCustomIconStatus) discoveryCustomIconStatus.textContent = '';
+        if (discoveryCustomIconModal) discoveryCustomIconModal.classList.add('hidden');
+    });
+}
 if (discoveryAiImageQueryInput) {
     discoveryAiImageQueryInput.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter') return;
@@ -4502,22 +4556,7 @@ if (discoveryAiImageQueryInput) {
         discoveryIconSearchPage = 0;
         void generateDiscoveryIconPreview(0);
     });
-    discoveryAiImageQueryInput.addEventListener('blur', () => {
-        syncDiscoveryImageQueryInput();
-    });
 }
-if (discoveryAiImagePrevBtn) {
-    discoveryAiImagePrevBtn.addEventListener('click', () => {
-        if (discoveryIconSearchPage <= 0) return;
-        void generateDiscoveryIconPreview(discoveryIconSearchPage - 1);
-    });
-}
-if (discoveryAiImageNextBtn) {
-    discoveryAiImageNextBtn.addEventListener('click', () => {
-        void generateDiscoveryIconPreview(discoveryIconSearchPage + 1);
-    });
-}
-
 if (discoveryApplyIconUrlBtn) {
     discoveryApplyIconUrlBtn.addEventListener('click', () => {
         void applyDiscoveryIconFromUrl();

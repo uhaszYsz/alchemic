@@ -642,12 +642,6 @@
                         <input id="discovery-name-input" type="text" maxlength="40" placeholder="Type your own name or tap suggestion" class="w-full bg-slate-800/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
                     </label>
                 </div>
-                <div>
-                    <span class="block text-[11px] uppercase tracking-wide text-slate-400 mb-1">Name color</span>
-                    <div id="discovery-name-color-grid" class="grid grid-cols-10 gap-1.5">
-                        <!-- 20 color swatches injected by JS -->
-                    </div>
-                </div>
                 <div class="pt-1">
                     <span class="block text-[11px] uppercase tracking-wide text-slate-400 mb-1">Icon image</span>
                     <div class="mb-2 flex gap-2">
@@ -655,31 +649,9 @@
                         <button id="discovery-ai-image-btn" class="py-2.5 px-3 bg-indigo-700 hover:bg-indigo-600 text-indigo-100 text-sm font-semibold rounded-lg transition whitespace-nowrap">
                             Search icons
                         </button>
-                    </div>
-                    <div id="discovery-ai-image-grid" class="hidden grid grid-cols-4 gap-2 mb-2">
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 1" loading="lazy" /></button>
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 2" loading="lazy" /></button>
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 3" loading="lazy" /></button>
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 4" loading="lazy" /></button>
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 5" loading="lazy" /></button>
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 6" loading="lazy" /></button>
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 7" loading="lazy" /></button>
-                        <button type="button" class="discovery-ai-image-choice hidden p-1 rounded border border-slate-600 bg-slate-900/70"><img alt="Icon option 8" loading="lazy" /></button>
-                    </div>
-                    <div class="flex items-center justify-between gap-2 mb-2">
-                        <button id="discovery-ai-image-prev" type="button" class="min-h-[36px] px-3 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold">Prev</button>
-                        <span id="discovery-ai-image-page" class="text-xs text-slate-400">Page 1</span>
-                        <button id="discovery-ai-image-next" type="button" class="min-h-[36px] px-3 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold">Next</button>
-                    </div>
-                    <div class="flex gap-2">
-                        <input id="discovery-icon-url" type="url" placeholder="https://example.com/icon.png" class="flex-1 bg-slate-800/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
-                        <button id="discovery-apply-icon-url" class="py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold rounded-lg transition">
-                            Load URL
+                        <button id="discovery-open-custom-icon" class="py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold rounded-lg transition whitespace-nowrap">
+                            Custom icon
                         </button>
-                        <button id="discovery-upload-icon-btn" class="py-2.5 px-3 bg-blue-700 hover:bg-blue-600 text-blue-100 text-sm font-semibold rounded-lg transition">
-                            Upload
-                        </button>
-                        <input id="discovery-upload-icon-file" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" class="hidden" />
                     </div>
                     <p id="discovery-ai-image-status" class="text-xs text-slate-400 mt-2 min-h-[1rem]"></p>
                     <img id="discovery-ai-image-img" class="hidden mt-2 rounded border border-slate-600 bg-slate-900/70 p-1" alt="Icon preview" />
@@ -693,6 +665,33 @@
                     </button>
                     <button id="save-discovery" class="flex-[2] py-3 bg-blue-600 hover:bg-blue-500 font-bold rounded-lg transition transform active:scale-95">
                         Confirm
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="discovery-custom-icon-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[60] backdrop-blur-sm px-3">
+        <div class="bg-slate-800 p-6 rounded-2xl border border-blue-500/50 shadow-2xl max-w-xl w-full">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-lg font-semibold text-slate-100">Custom icon</h3>
+                <button type="button" id="close-discovery-custom-icon" class="min-h-[40px] px-3 py-2 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-sm font-semibold">Close</button>
+            </div>
+            <div class="space-y-3">
+                <div class="flex gap-2">
+                    <input id="discovery-icon-url" type="url" placeholder="https://example.com/icon.png" class="flex-1 bg-slate-800/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
+                    <button id="discovery-apply-icon-url" class="py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold rounded-lg transition">
+                        Use URL
+                    </button>
+                    <button id="discovery-upload-icon-btn" class="py-2.5 px-3 bg-blue-700 hover:bg-blue-600 text-blue-100 text-sm font-semibold rounded-lg transition">
+                        Upload
+                    </button>
+                    <input id="discovery-upload-icon-file" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" class="hidden" />
+                </div>
+                <p id="discovery-custom-icon-status" class="text-xs text-slate-400 min-h-[1rem]"></p>
+                <div class="flex justify-end pt-1">
+                    <button type="button" id="discovery-custom-icon-ok" class="min-h-[40px] px-4 py-2 rounded-lg bg-blue-700 border border-blue-600 text-blue-100 text-sm font-semibold">
+                        OK
                     </button>
                 </div>
             </div>
