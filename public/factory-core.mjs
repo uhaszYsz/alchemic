@@ -47,6 +47,7 @@ export function simulateFactoryStep(state, deps) {
     const getTransporterDir = deps.getTransporterDir;
     const getCombinerDir = deps.getCombinerDir;
     const resolveRecipeId = deps.resolveRecipeId;
+    const loopTick = Number(state.loopTick || 0) | 0;
 
     const work = {};
     for (const [k, v] of Object.entries(state.cellItems || {})) {
@@ -56,7 +57,6 @@ export function simulateFactoryStep(state, deps) {
 
     const spawns = [];
     const spawnedThisTick = new Set();
-    const loopTick = Number(state.loopTick || 0) | 0;
     const extractorTick = (loopTick & 1) === 0;
     if (extractorTick) {
         for (const [key, p] of Object.entries(state.placements || {})) {
@@ -117,38 +117,74 @@ export function simulateFactoryStep(state, deps) {
     const claimedDest = new Set();
     const claimedFrom = new Set();
     movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
+    const ttByDest = new Map();
+    for (const m of movesTTCandidates) {
+        const arr = ttByDest.get(m.to);
+        if (arr) arr.push(m);
+        else ttByDest.set(m.to, [m]);
+    }
+    const ttDestKeys = Array.from(ttByDest.keys()).sort();
+    const rotateStart = (destKey, count, pass) => {
+        let h = 0;
+        const s = String(destKey || '');
+        for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+        return ((h + loopTick + pass) >>> 0) % Math.max(1, count);
+    };
     // Resolve in passes so an item can enter a cell vacated earlier in the same tick.
     for (let pass = 0; pass < movesTTCandidates.length; pass++) {
         let progressed = false;
-        for (const m of movesTTCandidates) {
-            if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
-            // Destination may have become occupied earlier in the tick; if so, wait.
-            if (work[m.to]) continue;
-            // Source may have been consumed/changed earlier in the tick; if so, skip.
-            if (!work[m.from] || work[m.from] !== m.itemId) continue;
-            claimedDest.add(m.to);
-            claimedFrom.add(m.from);
-            delete work[m.from];
-            work[m.to] = m.itemId;
-            movesTT.push(m);
-            progressed = true;
+        for (const destKey of ttDestKeys) {
+            if (claimedDest.has(destKey)) continue;
+            if (work[destKey]) continue;
+            const list = ttByDest.get(destKey);
+            if (!list || list.length === 0) continue;
+            const start = rotateStart(destKey, list.length, pass);
+            for (let i = 0; i < list.length; i++) {
+                const m = list[(start + i) % list.length];
+                if (claimedFrom.has(m.from)) continue;
+                // Source may have been consumed/changed earlier in the tick; if so, skip.
+                if (!work[m.from] || work[m.from] !== m.itemId) continue;
+                claimedDest.add(destKey);
+                claimedFrom.add(m.from);
+                delete work[m.from];
+                work[destKey] = m.itemId;
+                movesTT.push(m);
+                progressed = true;
+                break;
+            }
         }
         if (!progressed) break;
     }
 
     movesToEmptyCombinerCandidates.sort((a, b) => a.from.localeCompare(b.from));
+    const tcByDest = new Map();
+    for (const m of movesToEmptyCombinerCandidates) {
+        const arr = tcByDest.get(m.to);
+        if (arr) arr.push(m);
+        else tcByDest.set(m.to, [m]);
+    }
+    const tcDestKeys = Array.from(tcByDest.keys()).sort();
     for (let pass = 0; pass < movesToEmptyCombinerCandidates.length; pass++) {
         let progressed = false;
-        for (const m of movesToEmptyCombinerCandidates) {
-            if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
-            if (work[m.to]) continue;
-            if (state.combinerDiscovery && state.combinerDiscovery[m.to]) continue;
-            claimedDest.add(m.to);
-            claimedFrom.add(m.from);
-            delete work[m.from];
-            work[m.to] = m.itemId;
-            movesToEmptyCombiner.push(m);
-            progressed = true;
+        for (const destKey of tcDestKeys) {
+            if (claimedDest.has(destKey)) continue;
+            if (work[destKey]) continue;
+            if (state.combinerDiscovery && state.combinerDiscovery[destKey]) continue;
+            const list = tcByDest.get(destKey);
+            if (!list || list.length === 0) continue;
+            const start = rotateStart(destKey, list.length, pass);
+            for (let i = 0; i < list.length; i++) {
+                const m = list[(start + i) % list.length];
+                if (claimedFrom.has(m.from)) continue;
+                if (!work[m.from] || work[m.from] !== m.itemId) continue;
+                claimedDest.add(destKey);
+                claimedFrom.add(m.from);
+                delete work[m.from];
+                work[destKey] = m.itemId;
+                movesToEmptyCombiner.push(m);
+                progressed = true;
+                break;
+            }
         }
         if (!progressed) break;
     }
