@@ -97,7 +97,7 @@ export function simulateFactoryStep(state, deps) {
         const destPl = state.placements[destKey];
         if (destPl === 'storage') {
             deposits.push({ from: key, to: destKey, itemId });
-        } else if (destPl === 'transporter' && !work[destKey]) {
+        } else if (destPl === 'transporter') {
             movesTTCandidates.push({ from: key, to: destKey, itemId });
         } else if (destPl === 'combiner') {
             if (state.combinerDiscovery && state.combinerDiscovery[destKey]) continue;
@@ -117,29 +117,40 @@ export function simulateFactoryStep(state, deps) {
     const claimedDest = new Set();
     const claimedFrom = new Set();
     movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
-    for (const m of movesTTCandidates) {
-        if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
-        // Destination may have become occupied earlier in the tick; if so, wait.
-        if (work[m.to]) continue;
-        // Source may have been consumed/changed earlier in the tick; if so, skip.
-        if (!work[m.from] || work[m.from] !== m.itemId) continue;
-        claimedDest.add(m.to);
-        claimedFrom.add(m.from);
-        delete work[m.from];
-        work[m.to] = m.itemId;
-        movesTT.push(m);
+    // Resolve in passes so an item can enter a cell vacated earlier in the same tick.
+    for (let pass = 0; pass < movesTTCandidates.length; pass++) {
+        let progressed = false;
+        for (const m of movesTTCandidates) {
+            if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
+            // Destination may have become occupied earlier in the tick; if so, wait.
+            if (work[m.to]) continue;
+            // Source may have been consumed/changed earlier in the tick; if so, skip.
+            if (!work[m.from] || work[m.from] !== m.itemId) continue;
+            claimedDest.add(m.to);
+            claimedFrom.add(m.from);
+            delete work[m.from];
+            work[m.to] = m.itemId;
+            movesTT.push(m);
+            progressed = true;
+        }
+        if (!progressed) break;
     }
 
     movesToEmptyCombinerCandidates.sort((a, b) => a.from.localeCompare(b.from));
-    for (const m of movesToEmptyCombinerCandidates) {
-        if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
-        if (work[m.to]) continue;
-        if (state.combinerDiscovery && state.combinerDiscovery[m.to]) continue;
-        claimedDest.add(m.to);
-        claimedFrom.add(m.from);
-        delete work[m.from];
-        work[m.to] = m.itemId;
-        movesToEmptyCombiner.push(m);
+    for (let pass = 0; pass < movesToEmptyCombinerCandidates.length; pass++) {
+        let progressed = false;
+        for (const m of movesToEmptyCombinerCandidates) {
+            if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
+            if (work[m.to]) continue;
+            if (state.combinerDiscovery && state.combinerDiscovery[m.to]) continue;
+            claimedDest.add(m.to);
+            claimedFrom.add(m.from);
+            delete work[m.from];
+            work[m.to] = m.itemId;
+            movesToEmptyCombiner.push(m);
+            progressed = true;
+        }
+        if (!progressed) break;
     }
 
     const combined = [];
