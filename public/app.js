@@ -1982,9 +1982,13 @@ function renderFactoryRuntimeStatsModal() {
 }
 
 async function pullFactoryRuntimeStatus() {
+    // Disabled by request: no runtime pull from /api/factory/runtime.
+}
+
+async function startFactoryRunOnServer() {
     if (!state.auth.token) return;
     try {
-        const r = await apiFetch('/api/factory/runtime');
+        const r = await apiFetch('/api/factory/run/start', { method: 'POST' });
         if (!r.ok) return;
         const payload = await r.json();
         if (payload && payload.runtime) applyFactoryRuntime(payload.runtime);
@@ -1995,15 +1999,6 @@ async function pullFactoryRuntimeStatus() {
 
 function startFactoryRuntimeSyncLoop() {
     if (!state.auth.token) return;
-    if (state.auth.factoryRuntimeTimerId != null) return;
-    state.auth.factoryRuntimeTimerId = setInterval(() => {
-        if (state.activeWorkspace === 'factory') {
-            void pullFactoryRuntimeStatus();
-        }
-    }, 2000);
-    if (state.activeWorkspace === 'factory') {
-        void pullFactoryRuntimeStatus();
-    }
     if (state.auth.factoryRuntimeUiTimerId == null) {
         state.auth.factoryRuntimeUiTimerId = setInterval(() => {
             renderFactoryRuntimeStatus();
@@ -2012,9 +2007,10 @@ function startFactoryRuntimeSyncLoop() {
 }
 
 function stopFactoryRuntimeSyncLoop() {
-    if (state.auth.factoryRuntimeTimerId == null) return;
-    clearInterval(state.auth.factoryRuntimeTimerId);
-    state.auth.factoryRuntimeTimerId = null;
+    if (state.auth.factoryRuntimeTimerId != null) {
+        clearInterval(state.auth.factoryRuntimeTimerId);
+        state.auth.factoryRuntimeTimerId = null;
+    }
     if (state.auth.factoryRuntimeUiTimerId != null) {
         clearInterval(state.auth.factoryRuntimeUiTimerId);
         state.auth.factoryRuntimeUiTimerId = null;
@@ -2426,16 +2422,6 @@ function stopFactoryLoop() {
 }
 
 function onFactoryLoopTick() {
-    const syncedAt = Number(state.auth.factoryRuntimeSyncedAt || 0);
-    const runtimeFresh = syncedAt > 0 && Date.now() - syncedAt <= 5000;
-    if (!runtimeFresh) {
-        void pullFactoryRuntimeStatus();
-        return;
-    }
-    const rt = state.factoryRuntime || {};
-    const runUntilAtMs = Number(rt.runUntilAtMs || 0);
-    const isServerRunActive = rt.running === true && runUntilAtMs > Date.now();
-    if (!isServerRunActive) return;
     state.factory.loopTick = (state.factory.loopTick | 0) + 1;
     factoryRunSimTick();
     state.factory.loopPulseUntil = performance.now() + 120;
@@ -4348,8 +4334,8 @@ function setWorkspace(which) {
                 })
                 .finally(() => {
                     state.auth.enteringFactory = false;
-                    // Opening factory should start a fresh server run even if user did not edit layout yet.
-                    notifyFactoryStateMutated();
+                    // Start run window without overwriting server-side factory state.
+                    void startFactoryRunOnServer();
                     renderFactoryGrid();
                     startFactoryLoop();
                     void pullFactoryRuntimeStatus();

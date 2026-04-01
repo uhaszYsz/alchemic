@@ -436,6 +436,7 @@ function factoryStep(state) {
         const destPl = state.placements[dest];
         if (destPl === 'storage') {
             invDelta[itemId] = (invDelta[itemId] || 0) + 1;
+            console.log(`[factory-store] transporter=${key} storage=${dest} item=${itemId}`);
             delete work[key];
         } else if (destPl === 'transporter' && !work[dest]) {
             work[dest] = itemId;
@@ -466,6 +467,7 @@ function factoryStep(state) {
         if (state.placements[outKey] !== 'transporter') continue;
         if (work[outKey]) continue;
         work[outKey] = resultId;
+        console.log(`[factory-combine] combiner=${k} a=${a} b=${b} result=${resultId}`);
         for (const input of arr.slice(0, 2)) {
             delete work[input.from];
         }
@@ -1231,6 +1233,16 @@ const server = http.createServer((req, res) => {
         if (!auth) return send(res, 401, 'unauthorized', CORS_API);
         const st = getOrInitFactoryState(auth.userId);
         sendJson(res, 200, { ok: true, serverNow: Date.now(), runtime: factoryRuntimeStatus(st) }, CORS_API);
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/factory/run/start') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        const st = getOrInitFactoryState(auth.userId);
+        activateFactoryRunWindow(st, Date.now());
+        persistFactoryState(auth.userId, st);
+        sendJson(res, 200, { ok: true, runtime: factoryRuntimeStatus(st) }, CORS_API);
         return;
     }
 
