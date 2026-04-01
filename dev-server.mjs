@@ -511,8 +511,8 @@ function composeDiscoverySuggestionRequest(input) {
         `Give exactly six name ideas for an industry based/civilization/economic game.\n\n` +
         `What in factory can be built using only or mainly "${itemName1}" and "${itemName2}"??\n\n` +
         `Use one word when possible; two words are allowed only when necessary.\n` +
-        `Can be resource,material,tool,item,element.\n` +
-        `must be real item.\n\n` +
+        `MUST BE ONE OF THESE - resource,material,tool,item,element,part, prop.\n` +
+        `cant be building planet or abstract.\n\n` +
         `Each proposition must include one fitting emoji.\n\n` +
         `Reply in JSON only (no markdown fences, no text outside the object), using this exact shape:\n` +
         `{\n` +
