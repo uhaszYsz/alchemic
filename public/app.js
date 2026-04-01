@@ -14,7 +14,8 @@ const state = {
     activeElements: [],
     draggedItem: null,
     pendingCombination: null,
-    pendingDiscoveryNotice: null,
+    /** Pending discovery notices waiting to be opened from floating button. */
+    pendingDiscoveryNotices: [],
     /** @type {{ name: string, emoji: string }[]} last AI suggestions (emoji + name) */
     aiSuggestions: [],
     /** Chosen discovery name (must be one of aiSuggestions); no free typing */
@@ -1090,30 +1091,30 @@ function renderGlobalDiscoveriesPage() {
                 const upBtn = document.createElement('button');
                 upBtn.type = 'button';
                 upBtn.className =
-                    'min-h-[30px] px-2 rounded-md border border-emerald-700/80 bg-emerald-900/40 text-emerald-200 text-xs font-semibold hover:bg-emerald-800/60';
+                    'min-h-[32px] px-2.5 rounded-md border border-emerald-500/80 bg-emerald-600/25 text-emerald-100 text-xs font-semibold hover:bg-emerald-500/35 transition';
                 upBtn.setAttribute('data-discovery-vote-btn', '1');
                 upBtn.setAttribute('data-vote', 'up');
                 upBtn.setAttribute('data-id', row.id);
-                upBtn.textContent = `▲ ${upvotes}`;
+                upBtn.textContent = `👍 ${upvotes}`;
                 right.appendChild(upBtn);
 
                 const downBtn = document.createElement('button');
                 downBtn.type = 'button';
                 downBtn.className =
-                    'min-h-[30px] px-2 rounded-md border border-rose-700/80 bg-rose-900/40 text-rose-200 text-xs font-semibold hover:bg-rose-800/60';
+                    'min-h-[32px] px-2.5 rounded-md border border-rose-500/80 bg-rose-600/25 text-rose-100 text-xs font-semibold hover:bg-rose-500/35 transition';
                 downBtn.setAttribute('data-discovery-vote-btn', '1');
                 downBtn.setAttribute('data-vote', 'down');
                 downBtn.setAttribute('data-id', row.id);
-                downBtn.textContent = `▼ ${downvotes}`;
+                downBtn.textContent = `👎 ${downvotes}`;
                 right.appendChild(downBtn);
 
                 const proposalBtn = document.createElement('button');
                 proposalBtn.type = 'button';
                 proposalBtn.className =
-                    'min-h-[30px] px-2 rounded-md border border-blue-700/80 bg-blue-900/40 text-blue-200 text-xs font-semibold hover:bg-blue-800/60';
+                    'min-h-[32px] px-3 rounded-md border border-fuchsia-400/80 bg-gradient-to-r from-fuchsia-600/70 to-sky-600/70 text-white text-xs font-bold hover:from-fuchsia-500/80 hover:to-sky-500/80 transition shadow';
                 proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
                 proposalBtn.setAttribute('data-id', row.id);
-                proposalBtn.textContent = 'Vote...';
+                proposalBtn.textContent = '🗳️ Vote';
                 right.appendChild(proposalBtn);
             }
             top.appendChild(right);
@@ -1150,26 +1151,26 @@ function renderGlobalDiscoveriesPage() {
                     up.className =
                         'min-h-[28px] px-2 rounded-md border text-xs font-semibold ' +
                         (p.myVote === 1
-                            ? 'border-emerald-400 bg-emerald-700/60 text-emerald-100'
-                            : 'border-emerald-700/80 bg-emerald-900/40 text-emerald-200');
+                            ? 'border-emerald-300 bg-emerald-600/70 text-emerald-50'
+                            : 'border-emerald-500/80 bg-emerald-600/25 text-emerald-100');
                     up.setAttribute('data-discovery-proposal-vote-btn', '1');
                     up.setAttribute('data-proposal-vote', 'up');
                     up.setAttribute('data-proposal-id', String(p.id));
                     up.setAttribute('data-item-id', row.id);
-                    up.textContent = `▲ ${Math.max(0, Number(p.upvotes || 0) | 0)}`;
+                    up.textContent = `👍 ${Math.max(0, Number(p.upvotes || 0) | 0)}`;
                     footer.appendChild(up);
                     const down = document.createElement('button');
                     down.type = 'button';
                     down.className =
                         'min-h-[28px] px-2 rounded-md border text-xs font-semibold ' +
                         (p.myVote === -1
-                            ? 'border-rose-400 bg-rose-700/60 text-rose-100'
-                            : 'border-rose-700/80 bg-rose-900/40 text-rose-200');
+                            ? 'border-rose-300 bg-rose-600/70 text-rose-50'
+                            : 'border-rose-500/80 bg-rose-600/25 text-rose-100');
                     down.setAttribute('data-discovery-proposal-vote-btn', '1');
                     down.setAttribute('data-proposal-vote', 'down');
                     down.setAttribute('data-proposal-id', String(p.id));
                     down.setAttribute('data-item-id', row.id);
-                    down.textContent = `▼ ${Math.max(0, Number(p.downvotes || 0) | 0)}`;
+                    down.textContent = `👎 ${Math.max(0, Number(p.downvotes || 0) | 0)}`;
                     footer.appendChild(down);
                     line.appendChild(footer);
                     expanded.appendChild(line);
@@ -1759,12 +1760,13 @@ function hideDiscoveryCheckModal() {
 }
 
 function updateFloatingDiscoveryAlert(blink) {
-    const hasPending = !!state.pendingDiscoveryNotice;
+    const pendingCount = Array.isArray(state.pendingDiscoveryNotices) ? state.pendingDiscoveryNotices.length : 0;
+    const hasPending = pendingCount > 0;
     if (floatingDiscoveryAlertWrapEl) {
         floatingDiscoveryAlertWrapEl.classList.toggle('hidden', !hasPending);
     }
     if (floatingDiscoveryAlertCountEl) {
-        floatingDiscoveryAlertCountEl.textContent = hasPending ? '1' : '0';
+        floatingDiscoveryAlertCountEl.textContent = String(pendingCount);
     }
     if (!openLatestDiscoveryBtn) return;
     openLatestDiscoveryBtn.disabled = !hasPending;
@@ -2290,12 +2292,6 @@ function startAiForCombination(a, b) {
 }
 
 async function queueDiscoveryNotice(a, b, comboKey, preloadedParsed, factoryCombKey) {
-    const previous = state.pendingDiscoveryNotice;
-    if (previous) {
-        const fallbackName = previous.name || makeUnnamedDiscoveryName();
-        const fallbackEmoji = previous.emoji || '✨';
-        await savePendingDiscovery(previous, fallbackName, fallbackEmoji, previous.nameColor || '');
-    }
     const notice = {
         a,
         b,
@@ -2309,14 +2305,13 @@ async function queueDiscoveryNotice(a, b, comboKey, preloadedParsed, factoryComb
     };
     const unnamedName = makeUnnamedDiscoveryName();
     await savePendingDiscovery(notice, unnamedName, '✨', '');
-    state.pendingDiscoveryNotice = notice;
+    state.pendingDiscoveryNotices.push(notice);
     updateFloatingDiscoveryAlert(true);
 }
 
 function openLatestPendingDiscoveryModal() {
-    const notice = state.pendingDiscoveryNotice;
+    const notice = state.pendingDiscoveryNotices.pop();
     if (!notice) return;
-    state.pendingDiscoveryNotice = null;
     updateFloatingDiscoveryAlert(false);
     openDiscoveryModal(notice, notice.preloadedParsed);
 }
@@ -4323,7 +4318,7 @@ if (authLogoutBtn) {
         const oldToken = state.auth.token;
         state.auth.token = '';
         state.auth.username = '';
-        state.pendingDiscoveryNotice = null;
+        state.pendingDiscoveryNotices = [];
         state.pendingCombination = null;
         updateFloatingDiscoveryAlert(false);
         applyLoggedInUi();
@@ -4381,6 +4376,7 @@ function handleTouchStartFromLibrary(e, item) {
 
 async function bootAfterAuth() {
     await loadGameData();
+    state.pendingDiscoveryNotices = [];
     updateFloatingDiscoveryAlert(false);
     recomputeAllTiers();
     renderLibrary();
