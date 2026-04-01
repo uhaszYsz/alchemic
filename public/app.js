@@ -2757,8 +2757,12 @@ function setWorkspace(which) {
     state.activeWorkspace = which;
     const isLab = which === 'lab';
     const floatingUpgrades = document.getElementById('floating-factory-upgrades');
+    const floatingClear = document.getElementById('floating-clear-workspace');
     if (floatingUpgrades) {
         floatingUpgrades.classList.toggle('hidden', isLab);
+    }
+    if (floatingClear) {
+        floatingClear.classList.toggle('hidden', !isLab);
     }
     if (tabLabBtn && tabFactoryBtn) {
         tabLabBtn.classList.toggle('is-active', isLab);
