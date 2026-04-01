@@ -482,6 +482,15 @@ function tickAllFactories() {
     for (const [userId, st] of factoryStateByUser.entries()) {
         const runUntil = Number(st._factoryRunUntilAt || 0);
         if (!runUntil || runUntil <= 0) continue;
+        const dbgLast = Number(st._factoryDebugLastLogAt || 0);
+        if (!dbgLast || now - dbgLast >= 5000) {
+            st._factoryDebugLastLogAt = now;
+            console.log(
+                `[factory-run-alive] user=${Number(userId) | 0} remainingMs=${Math.max(0, runUntil - now)} placements=${Object.keys(
+                    st.placements || {}
+                ).length}`
+            );
+        }
         if (now >= runUntil) {
             if (!st._factoryRunStoppedAtIso) {
                 st._factoryRunStoppedAtIso = new Date(now).toISOString();
@@ -1334,6 +1343,11 @@ const server = http.createServer((req, res) => {
                         ? { ...prev._factoryLastProducedPerMinute }
                         : {};
                 activateFactoryRunWindow(st, Date.now());
+                console.log(
+                    `[factory-run-start] user=${auth.userId} placements=${Object.keys(st.placements || {}).length} loopMs=${factoryLoopIntervalMs(
+                        st
+                    )}`
+                );
                 factoryStateByUser.set(auth.userId, st);
                 persistFactoryState(auth.userId, st);
                 sendJson(
