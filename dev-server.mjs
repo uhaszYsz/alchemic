@@ -27,7 +27,21 @@ const OPENAI_KEY_FILE = path.join(__dirname, 'key.txt');
 function readOpenAiKeyFromFile() {
     try {
         const raw = fs.readFileSync(OPENAI_KEY_FILE, 'utf8');
-        return String(raw || '').trim();
+        const text = String(raw || '')
+            .replace(/^\uFEFF/, '')
+            .trim();
+        if (!text) return '';
+        const firstNonEmpty = text
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .find((line) => line.length > 0);
+        if (!firstNonEmpty) return '';
+        let candidate = firstNonEmpty;
+        const m = candidate.match(/^(?:export\s+)?OPENAI_API_KEY\s*=\s*(.+)$/i);
+        if (m && m[1]) candidate = m[1].trim();
+        candidate = candidate.replace(/^['"]|['"]$/g, '').trim();
+        if (!candidate.startsWith('sk-')) return '';
+        return candidate;
     } catch {
         return '';
     }
