@@ -268,27 +268,34 @@ export function simulateFactoryStep(state, deps) {
     }
 
     movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
-    for (const m of movesTTCandidates) {
-        if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
-        const acceptedFrom = acceptedFromByDest[m.to];
-        if (acceptedFrom && acceptedFrom !== m.from) continue;
-        if (work[m.to]) continue;
-        if (!work[m.from] || work[m.from] !== m.itemId) continue;
-        claimedDest.add(m.to);
-        claimedFrom.add(m.from);
-        delete work[m.from];
-        work[m.to] = m.itemId;
-        movesTT.push(m);
-        // Advance accepted input direction only after successful receive into this transporter.
-        if (acceptedFromByDest[m.to] && acceptedFromByDest[m.to] === m.from) {
-            const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(m.to));
-            let next = (((Number(cursorMap[m.to] || 0) | 0) + 4) % 4 + 1) % 4;
-            for (let i = 0; i < 4; i++) {
-                if (next !== skipDir) break;
-                next = (next + 1) % 4;
+    // Resolve transporter/sorter chains in multiple passes so upstream can fill
+    // a cell that becomes empty later in the same tick.
+    for (let pass = 0; pass < movesTTCandidates.length; pass++) {
+        let progressed = false;
+        for (const m of movesTTCandidates) {
+            if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
+            const acceptedFrom = acceptedFromByDest[m.to];
+            if (acceptedFrom && acceptedFrom !== m.from) continue;
+            if (work[m.to]) continue;
+            if (!work[m.from] || work[m.from] !== m.itemId) continue;
+            claimedDest.add(m.to);
+            claimedFrom.add(m.from);
+            delete work[m.from];
+            work[m.to] = m.itemId;
+            movesTT.push(m);
+            progressed = true;
+            // Advance accepted input direction only after successful receive into this transporter.
+            if (acceptedFromByDest[m.to] && acceptedFromByDest[m.to] === m.from) {
+                const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(m.to));
+                let next = (((Number(cursorMap[m.to] || 0) | 0) + 4) % 4 + 1) % 4;
+                for (let i = 0; i < 4; i++) {
+                    if (next !== skipDir) break;
+                    next = (next + 1) % 4;
+                }
+                cursorMap[m.to] = next;
             }
-            cursorMap[m.to] = next;
         }
+        if (!progressed) break;
     }
     state._ttInputCursor = cursorMap;
 
