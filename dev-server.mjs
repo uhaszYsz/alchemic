@@ -573,6 +573,7 @@ async function ensureImagesDir() {
 
 const MAX_USER_ICON_PNG_JPG_BYTES = 20 * 1024;
 const MAX_USER_ICON_GIF_BYTES = 120 * 1024;
+const ICON_SIZE_PX = 48;
 function imageExtFromBuffer(buf) {
     if (!buf || buf.length < 4) return null;
     if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
@@ -598,43 +599,33 @@ function imageExtFromBuffer(buf) {
 }
 
 /**
- * Remove top-left color from non-GIF icons and output PNG with alpha.
+ * Force icon file to fixed 48x48 px.
+ * Keeps GIF as GIF (animated) when possible.
  * @param {Buffer} buf
  * @param {string} ext
  * @returns {Promise<{ buf: Buffer, ext: string }>}
  */
-async function removeTopLeftColorBackground(buf, ext) {
-    if (!buf || ext === '.gif') return { buf, ext };
+async function forceIconSize48(buf, ext) {
+    if (!buf) return { buf, ext };
     try {
-        const rawOut = await sharp(buf, { animated: false, limitInputPixels: false })
-            .ensureAlpha()
-            .raw()
-            .toBuffer({ resolveWithObject: true });
-        const data = rawOut.data;
-        const info = rawOut.info;
-        if (!data || !info || info.channels < 4) return { buf, ext };
-        const r0 = data[0];
-        const g0 = data[1];
-        const b0 = data[2];
-        const tolerance = 16;
-        for (let i = 0; i < data.length; i += 4) {
-            const r = data[i];
-            const g = data[i + 1];
-            const b = data[i + 2];
-            if (
-                Math.abs(r - r0) <= tolerance &&
-                Math.abs(g - g0) <= tolerance &&
-                Math.abs(b - b0) <= tolerance
-            ) {
-                data[i + 3] = 0;
-            }
+        if (ext === '.gif') {
+            const outGif = await sharp(buf, { animated: true, limitInputPixels: false })
+                .resize(ICON_SIZE_PX, ICON_SIZE_PX, {
+                    fit: 'contain',
+                    background: { r: 0, g: 0, b: 0, alpha: 0 }
+                })
+                .gif()
+                .toBuffer();
+            return { buf: outGif, ext: '.gif' };
         }
-        const out = await sharp(data, {
-            raw: { width: info.width, height: info.height, channels: 4 }
-        })
+        const outPng = await sharp(buf, { animated: false, limitInputPixels: false })
+            .resize(ICON_SIZE_PX, ICON_SIZE_PX, {
+                fit: 'contain',
+                background: { r: 0, g: 0, b: 0, alpha: 0 }
+            })
             .png()
             .toBuffer();
-        return { buf: out, ext: '.png' };
+        return { buf: outPng, ext: '.png' };
     } catch {
         return { buf, ext };
     }
@@ -1684,12 +1675,12 @@ const server = http.createServer((req, res) => {
                     const err = validateStrictUserIconBytes(buf, ext);
                     if (err) return send(res, 413, err, CORS_API);
                 }
-                const processed = await removeTopLeftColorBackground(buf, ext);
-                buf = processed.buf;
-                ext = processed.ext;
+                const resized = await forceIconSize48(buf, ext);
+                buf = resized.buf;
+                ext = resized.ext;
                 const rel = `images/${safe}${ext}`;
                 await fs.promises.writeFile(path.join(__dirname, rel), buf);
-                setItemIconPath(db, id, rel);
+                setItemIconPath(db, id, rel, buf.length);
                 sendJson(res, 200, { ok: true, iconPath: rel }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));

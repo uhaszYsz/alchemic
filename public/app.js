@@ -143,6 +143,8 @@ function emojiForItemId(id) {
 }
 
 const factoryIconImageCache = new Map();
+const clientProcessedIconCache = new Map();
+const CLIENT_ICON_BG_TOLERANCE = 16;
 
 /** @param {string} itemId */
 function factoryGetLoadedIconImage(itemId) {
@@ -351,7 +353,9 @@ async function reloadCatalogFromApi() {
         for (const it of state.library) {
             const d = items[it.id];
             if (d && typeof d.iconPath === 'string' && d.iconPath.trim()) {
-                it.iconPath = d.iconPath.trim();
+                const iconPath = d.iconPath.trim();
+                it.iconPath = iconPath;
+                syncActiveElementsIconPath(it.id, iconPath);
             }
         }
         recomputeAllTiers();
@@ -364,18 +368,134 @@ async function reloadCatalogFromApi() {
 /** @param {{ iconPath?: string }} item */
 function iconSrcForItem(item) {
     if (!item || typeof item.iconPath !== 'string' || !item.iconPath.trim()) return null;
-    return `${apiOrigin()}/${item.iconPath.replace(/^\/+/, '')}`;
+    const rawSrc = `${apiOrigin()}/${item.iconPath.replace(/^\/+/, '')}`;
+    return getClientIconDisplaySrc(rawSrc);
+}
+
+/** @param {string} rawSrc */
+function getClientIconDisplaySrc(rawSrc) {
+    const src = String(rawSrc || '').trim();
+    if (!src) return src;
+    let rec = clientProcessedIconCache.get(src);
+    if (!rec) {
+        rec = { displaySrc: src, processing: false };
+        clientProcessedIconCache.set(src, rec);
+    }
+    if (!rec.processing) {
+        rec.processing = true;
+        void processIconBackgroundOnClient(src)
+            .then((nextSrc) => {
+                if (!nextSrc || nextSrc === src) return;
+                rec.displaySrc = nextSrc;
+                // Trigger refresh so existing DOM/canvas starts using processed icon.
+                renderCanvas();
+                renderLibrary();
+                if (state.activeWorkspace === 'factory') factoryStartRenderLoop();
+            })
+            .catch(() => {})
+            .finally(() => {
+                rec.processing = false;
+            });
+    }
+    return rec.displaySrc;
+}
+
+/**
+ * Remove top-left color in browser once, cache as object URL.
+ * @param {string} src
+ * @returns {Promise<string>}
+ */
+async function processIconBackgroundOnClient(src) {
+    const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('icon load failed'));
+        el.src = src;
+    });
+    const w = Math.max(1, Number(img.naturalWidth || img.width || 0) | 0);
+    const h = Math.max(1, Number(img.naturalHeight || img.height || 0) | 0);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return src;
+    ctx.drawImage(img, 0, 0, w, h);
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const data = imageData.data;
+    if (!data || data.length < 4) return src;
+    const r0 = data[0];
+    const g0 = data[1];
+    const b0 = data[2];
+    for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        if (
+            Math.abs(r - r0) <= CLIENT_ICON_BG_TOLERANCE &&
+            Math.abs(g - g0) <= CLIENT_ICON_BG_TOLERANCE &&
+            Math.abs(b - b0) <= CLIENT_ICON_BG_TOLERANCE
+        ) {
+            data[i + 3] = 0;
+        }
+    }
+    ctx.putImageData(imageData, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) return src;
+    return URL.createObjectURL(blob);
+}
+
+/** @param {string} id @param {string} iconPath */
+function syncActiveElementsIconPath(id, iconPath) {
+    const targetId = String(id || '').trim();
+    const nextIconPath = String(iconPath || '').trim();
+    if (!targetId || !nextIconPath) return;
+    let changed = false;
+    for (const el of state.activeElements) {
+        if (String(el.id || '') !== targetId) continue;
+        if (String(el.iconPath || '') === nextIconPath) continue;
+        el.iconPath = nextIconPath;
+        changed = true;
+    }
+    if (!changed) return;
+    // Force DOM node rebuild so workspace switches from emoji to image icon.
+    const nodeList = Array.from(workspaceEl.querySelectorAll('.canvas-element'));
+    for (const node of nodeList) {
+        const uid = String(node && node.dataset ? node.dataset.uid || '' : '');
+        if (!uid) continue;
+        const item = state.activeElements.find((entry) => String(entry.uid || '') === uid);
+        if (item && String(item.id || '') === targetId) node.remove();
+    }
+    renderCanvas();
+}
+
+/** @param {string} iconPath */
+function invalidateIconProcessingCache(iconPath) {
+    const rel = String(iconPath || '').trim().replace(/^\/+/, '');
+    if (!rel) return;
+    const rawSrc = `${apiOrigin()}/${rel}`;
+    const rec = clientProcessedIconCache.get(rawSrc);
+    if (rec && rec.displaySrc && rec.displaySrc !== rawSrc && String(rec.displaySrc).startsWith('blob:')) {
+        try {
+            URL.revokeObjectURL(rec.displaySrc);
+        } catch {}
+    }
+    clientProcessedIconCache.delete(rawSrc);
+    factoryIconImageCache.delete(rawSrc);
 }
 
 /** @param {string} id @param {string} iconPath */
 function persistIconPathForItem(id, iconPath) {
+    invalidateIconProcessingCache(iconPath);
     const li = state.library.findIndex((e) => e.id === id);
+    const prevPath = li >= 0 && typeof state.library[li].iconPath === 'string' ? state.library[li].iconPath : '';
+    if (prevPath && prevPath !== iconPath) invalidateIconProcessingCache(prevPath);
     if (li >= 0) {
         state.library[li] = { ...state.library[li], iconPath };
     }
     if (cachedBaseItemsMap && cachedBaseItemsMap[id]) {
         cachedBaseItemsMap[id] = { ...cachedBaseItemsMap[id], iconPath };
     }
+    syncActiveElementsIconPath(id, iconPath);
 }
 
 const DISCOVERY_UPLOAD_LIMIT_PNG_JPG = 20 * 1024;
@@ -860,6 +980,19 @@ function discoveryDateStamp() {
     );
 }
 
+/**
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatKbValue(bytes) {
+    const n = Math.max(0, Number(bytes) || 0);
+    if (!Number.isFinite(n) || n <= 0) return '0';
+    const kb = n / 1024;
+    if (kb >= 100) return String(Math.round(kb));
+    if (kb >= 10) return kb.toFixed(1);
+    return kb.toFixed(2);
+}
+
 function makeUnnamedDiscoveryName() {
     return `unnamed_${discoveryDateStamp()}_${safeUsernameForDiscoveryName()}`;
 }
@@ -972,7 +1105,7 @@ async function loadGameData() {
 }
 
 /**
- * @param {Record<string, { emoji?: string, name?: string, nameColor?: string, discoveredAt?: string, a?: string, b?: string, upvotes?: number, downvotes?: number }>} items
+ * @param {Record<string, { emoji?: string, name?: string, nameColor?: string, discoveredAt?: string, discoveredByUsername?: string, iconPath?: string, iconSizeBytes?: number, a?: string, b?: string, upvotes?: number, downvotes?: number }>} items
  */
 function buildGlobalDiscoveriesRows(items) {
     const rows = [];
@@ -993,6 +1126,15 @@ function buildGlobalDiscoveriesRows(items) {
         }
         if (typeof def.discoveredAt === 'string' && def.discoveredAt.trim()) {
             row.discoveredAt = def.discoveredAt.trim();
+        }
+        if (typeof def.discoveredByUsername === 'string' && def.discoveredByUsername.trim()) {
+            row.discoveredByUsername = def.discoveredByUsername.trim();
+        }
+        if (typeof def.iconPath === 'string' && def.iconPath.trim()) {
+            row.iconPath = def.iconPath.trim();
+        }
+        if (Number.isFinite(Number(def.iconSizeBytes)) && Number(def.iconSizeBytes) > 0) {
+            row.iconSizeBytes = Math.max(0, Number(def.iconSizeBytes) | 0);
         }
         if (Number.isFinite(Number(def.upvotes))) {
             row.upvotes = Math.max(0, Number(def.upvotes) | 0);
@@ -1276,7 +1418,13 @@ function renderGlobalDiscoveriesPage() {
             comboEl.textContent = comboText;
             const metaEl = document.createElement('div');
             metaEl.className = 'text-[11px] text-slate-500 truncate';
-            metaEl.textContent = `${row.id}${row.discoveredAt ? ` - ${new Date(row.discoveredAt).toLocaleString()}` : ''}`;
+            const discoveredBy = row.discoveredByUsername ? row.discoveredByUsername : 'system';
+            const metaParts = [`Discovered by: ${discoveredBy}`];
+            if (row.discoveredAt) metaParts.push(new Date(row.discoveredAt).toLocaleString());
+            if (Number.isFinite(Number(row.iconSizeBytes)) && Number(row.iconSizeBytes) > 0) {
+                metaParts.push(`Icon: ${formatKbValue(row.iconSizeBytes)} KB`);
+            }
+            metaEl.textContent = metaParts.join(' | ');
             textWrap.appendChild(nameEl);
             textWrap.appendChild(comboEl);
             textWrap.appendChild(metaEl);

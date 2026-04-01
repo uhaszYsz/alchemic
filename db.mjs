@@ -50,6 +50,13 @@ function migrateItemsVotes(db) {
     }
 }
 
+function migrateItemsIconSizeBytes(db) {
+    const cols = db.prepare('PRAGMA table_info(items)').all();
+    if (!cols.some((c) => c.name === 'icon_size_bytes')) {
+        db.exec('ALTER TABLE items ADD COLUMN icon_size_bytes INTEGER NOT NULL DEFAULT 0');
+    }
+}
+
 function migrateItemsUniqueName(db) {
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_items_name_unique_nocase ON items(name COLLATE NOCASE)');
 }
@@ -102,6 +109,8 @@ export function openDb() {
             name_color TEXT,
             ingredient_a TEXT,
             ingredient_b TEXT,
+            icon_path TEXT,
+            icon_size_bytes INTEGER NOT NULL DEFAULT 0,
             discovered_by INTEGER,
             discovered_at TEXT,
             upvotes INTEGER NOT NULL DEFAULT 0,
@@ -158,6 +167,7 @@ export function openDb() {
     migrateItemsDiscoveredAt(db);
     migrateItemsNameColor(db);
     migrateItemsVotes(db);
+    migrateItemsIconSizeBytes(db);
     migrateItemsUniqueName(db);
     migrateDiscoveryProposalTables(db);
     migrateUsersLastSeenAt(db);
@@ -176,11 +186,28 @@ export function openDb() {
     return db;
 }
 
-/** @returns {Record<string, { emoji: string, name: string, nameColor?: string, a?: string, b?: string, iconPath?: string, discoveredBy?: number, discoveredAt?: string, upvotes?: number, downvotes?: number }>} */
+/** @returns {Record<string, { emoji: string, name: string, nameColor?: string, a?: string, b?: string, iconPath?: string, iconSizeBytes?: number, discoveredBy?: number, discoveredByUsername?: string, discoveredAt?: string, upvotes?: number, downvotes?: number }>} */
 export function getItemsMap(db) {
     const rows = db
         .prepare(
-            'SELECT id, emoji, name, name_color, ingredient_a AS a, ingredient_b AS b, icon_path, discovered_by, discovered_at, upvotes, downvotes FROM items ORDER BY id'
+            `SELECT
+                i.id,
+                i.emoji,
+                i.name,
+                i.name_color,
+                i.ingredient_a AS a,
+                i.ingredient_b AS b,
+                i.icon_path,
+                i.icon_size_bytes,
+                i.discovered_by,
+                i.discovered_at,
+                i.upvotes,
+                i.downvotes,
+                u.username AS discovered_by_username
+             FROM items AS i
+             LEFT JOIN users AS u
+               ON u.id = i.discovered_by
+             ORDER BY i.id`
         )
         .all();
     const out = {};
@@ -196,8 +223,14 @@ export function getItemsMap(db) {
         if (row.icon_path != null && row.icon_path !== '') {
             entry.iconPath = row.icon_path;
         }
+        if (Number.isFinite(Number(row.icon_size_bytes)) && Number(row.icon_size_bytes) > 0) {
+            entry.iconSizeBytes = Number(row.icon_size_bytes) | 0;
+        }
         if (row.discovered_by != null) {
             entry.discoveredBy = Number(row.discovered_by);
+        }
+        if (row.discovered_by_username != null && row.discovered_by_username !== '') {
+            entry.discoveredByUsername = String(row.discovered_by_username);
         }
         if (row.discovered_at != null && row.discovered_at !== '') {
             entry.discoveredAt = String(row.discovered_at);
@@ -353,10 +386,12 @@ export function deleteItemById(db, itemId) {
  * @param {import('better-sqlite3').Database} db
  * @param {string} id
  * @param {string} iconPathRelative project-relative path e.g. images/foo.png
+ * @param {number} iconSizeBytes
  */
-export function setItemIconPath(db, id, iconPathRelative) {
-    db.prepare('UPDATE items SET icon_path = @p WHERE id = @id').run({
+export function setItemIconPath(db, id, iconPathRelative, iconSizeBytes = 0) {
+    db.prepare('UPDATE items SET icon_path = @p, icon_size_bytes = @sz WHERE id = @id').run({
         p: iconPathRelative,
+        sz: Math.max(0, Math.floor(Number(iconSizeBytes) || 0)),
         id: String(id)
     });
 }
