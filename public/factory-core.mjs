@@ -78,6 +78,8 @@ export function simulateFactoryStep(state, deps) {
     }
 
     const deposits = [];
+    const movesTTCandidates = [];
+    const movesToEmptyCombinerCandidates = [];
     const movesTT = [];
     const movesToEmptyCombiner = [];
     const combinerFeeds = [];
@@ -96,11 +98,11 @@ export function simulateFactoryStep(state, deps) {
         if (destPl === 'storage') {
             deposits.push({ from: key, to: destKey, itemId });
         } else if (destPl === 'transporter' && !work[destKey]) {
-            movesTT.push({ from: key, to: destKey, itemId });
+            movesTTCandidates.push({ from: key, to: destKey, itemId });
         } else if (destPl === 'combiner') {
             if (state.combinerDiscovery && state.combinerDiscovery[destKey]) continue;
             if (!canCombinerAcceptFrom(destKey, key, getCombinerDir)) continue;
-            if (!work[destKey]) movesToEmptyCombiner.push({ from: key, to: destKey, itemId });
+            if (!work[destKey]) movesToEmptyCombinerCandidates.push({ from: key, to: destKey, itemId });
             else if (work[destKey] !== itemId) combinerFeeds.push({ from: key, to: destKey, incoming: itemId });
         }
     }
@@ -114,8 +116,8 @@ export function simulateFactoryStep(state, deps) {
 
     const claimedDest = new Set();
     const claimedFrom = new Set();
-    movesTT.sort((a, b) => a.from.localeCompare(b.from));
-    for (const m of movesTT) {
+    movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
+    for (const m of movesTTCandidates) {
         if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
         // Destination may have become occupied earlier in the tick; if so, wait.
         if (work[m.to]) continue;
@@ -125,10 +127,11 @@ export function simulateFactoryStep(state, deps) {
         claimedFrom.add(m.from);
         delete work[m.from];
         work[m.to] = m.itemId;
+        movesTT.push(m);
     }
 
-    movesToEmptyCombiner.sort((a, b) => a.from.localeCompare(b.from));
-    for (const m of movesToEmptyCombiner) {
+    movesToEmptyCombinerCandidates.sort((a, b) => a.from.localeCompare(b.from));
+    for (const m of movesToEmptyCombinerCandidates) {
         if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
         if (work[m.to]) continue;
         if (state.combinerDiscovery && state.combinerDiscovery[m.to]) continue;
@@ -136,6 +139,7 @@ export function simulateFactoryStep(state, deps) {
         claimedFrom.add(m.from);
         delete work[m.from];
         work[m.to] = m.itemId;
+        movesToEmptyCombiner.push(m);
     }
 
     const combined = [];
