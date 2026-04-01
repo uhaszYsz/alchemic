@@ -1559,6 +1559,9 @@ function renderGlobalDiscoveriesPage() {
     }
 
     if (globalDiscoveriesViewMode === 'tree') {
+        globalDiscoveriesListEl.classList.remove('divide-y', 'divide-slate-700/70');
+        globalDiscoveriesListEl.style.overflowX = 'auto';
+        globalDiscoveriesListEl.style.overflowY = 'auto';
         const byId = new Map(ordered.map((row) => [row.id, row]));
         /** @type {Record<string, string[]>} */
         const childrenByParent = {};
@@ -1584,23 +1587,246 @@ function renderGlobalDiscoveriesPage() {
         const compareIds = (a, b) => compareGlobalDiscoveriesRows(byId.get(a), byId.get(b));
         rootIds.sort(compareIds);
         Object.values(childrenByParent).forEach((ids) => ids.sort(compareIds));
-
-        const visited = new Set();
-        const appendNode = (id, depth, stack) => {
+        /** @type {Record<string, number>} */
+        const depthById = {};
+        /** @type {Record<string, number>} */
+        const yById = {};
+        let nextY = 0;
+        const assignDepth = (id, depth, stack) => {
             if (stack.has(id)) return;
-            const row = byId.get(id);
-            if (!row) return;
+            const current = depthById[id];
+            if (Number.isFinite(current) && current <= depth) return;
+            depthById[id] = depth;
             stack.add(id);
-            visited.add(id);
-            globalDiscoveriesListEl.appendChild(buildGlobalDiscoveryRowElement(row, depth));
-            const children = childrenByParent[id] || [];
-            for (const childId of children) appendNode(childId, depth + 1, stack);
+            for (const childId of childrenByParent[id] || []) assignDepth(childId, depth + 1, stack);
             stack.delete(id);
         };
+        const assignY = (id, stack) => {
+            if (Number.isFinite(yById[id])) return yById[id];
+            if (stack.has(id)) {
+                const cyc = nextY++;
+                yById[id] = cyc;
+                return cyc;
+            }
+            stack.add(id);
+            const children = childrenByParent[id] || [];
+            if (!children.length) {
+                const leafY = nextY++;
+                yById[id] = leafY;
+                stack.delete(id);
+                return leafY;
+            }
+            const ys = children.map((childId) => assignY(childId, stack)).filter((v) => Number.isFinite(v));
+            const minY = Math.min(...ys);
+            const maxY = Math.max(...ys);
+            const ownY = Number.isFinite(minY) && Number.isFinite(maxY) ? (minY + maxY) / 2 : nextY++;
+            yById[id] = ownY;
+            stack.delete(id);
+            return ownY;
+        };
 
-        for (const rootId of rootIds) appendNode(rootId, 0, new Set());
+        rootIds.forEach((id) => {
+            assignDepth(id, 0, new Set());
+            assignY(id, new Set());
+        });
         for (const row of ordered) {
-            if (!visited.has(row.id)) appendNode(row.id, 0, new Set());
+            if (!Number.isFinite(depthById[row.id])) assignDepth(row.id, 0, new Set());
+            if (!Number.isFinite(yById[row.id])) assignY(row.id, new Set());
+        }
+
+        const xStep = 320;
+        const yStep = 150;
+        const nodeWidth = 280;
+        const padX = 24;
+        const padY = 24;
+        const maxDepth = ordered.reduce((m, row) => Math.max(m, Number(depthById[row.id] || 0)), 0);
+        const maxY = ordered.reduce((m, row) => Math.max(m, Number(yById[row.id] || 0)), 0);
+        const scene = document.createElement('div');
+        scene.className = 'relative';
+        scene.style.width = `${padX * 2 + maxDepth * xStep + nodeWidth}px`;
+        scene.style.minHeight = `${Math.max(260, padY * 2 + (maxY + 1) * yStep)}px`;
+        globalDiscoveriesListEl.appendChild(scene);
+
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('class', 'absolute inset-0 pointer-events-none');
+        scene.appendChild(svg);
+
+        /** @type {Record<string, { left: number, top: number, midY: number }>} */
+        const posById = {};
+        let maxBottom = 0;
+        const orderedForPlacement = [...ordered].sort((a, b) => {
+            const dy = Number(yById[a.id] || 0) - Number(yById[b.id] || 0);
+            if (dy !== 0) return dy;
+            const dd = Number(depthById[a.id] || 0) - Number(depthById[b.id] || 0);
+            if (dd !== 0) return dd;
+            return compareGlobalDiscoveriesRows(a, b);
+        });
+        for (const row of orderedForPlacement) {
+            const left = padX + Number(depthById[row.id] || 0) * xStep;
+            const top = padY + Number(yById[row.id] || 0) * yStep;
+            const card = document.createElement('div');
+            card.className = 'absolute rounded-xl border border-slate-700 bg-slate-900/85 shadow-lg p-2 w-[280px]';
+            card.style.left = `${left}px`;
+            card.style.top = `${top}px`;
+            card.setAttribute('data-discovery-item-id', row.id);
+
+            const head = document.createElement('div');
+            head.className = 'flex items-center gap-2 min-w-0 cursor-pointer';
+            head.setAttribute('data-discovery-expand-toggle', row.id);
+
+            const iconWrap = document.createElement('div');
+            iconWrap.className =
+                'w-8 h-8 rounded-md border border-slate-600 bg-slate-900/70 shrink-0 flex items-center justify-center overflow-hidden';
+            const iconSrc = iconSrcForItem(row);
+            if (iconSrc) {
+                const iconImg = document.createElement('img');
+                iconImg.className = 'w-full h-full object-contain';
+                iconImg.src = iconSrc;
+                iconImg.alt = `${row.name} icon`;
+                iconWrap.appendChild(iconImg);
+            } else {
+                const emojiEl = document.createElement('span');
+                emojiEl.className = 'text-xl leading-none select-none';
+                emojiEl.setAttribute('aria-hidden', 'true');
+                emojiEl.textContent = row.emoji || '·';
+                iconWrap.appendChild(emojiEl);
+            }
+            head.appendChild(iconWrap);
+
+            const textWrap = document.createElement('div');
+            textWrap.className = 'min-w-0 flex-1';
+            const nameEl = document.createElement('div');
+            nameEl.className = 'text-sm text-slate-100 truncate';
+            if (row.nameColor) nameEl.style.color = row.nameColor;
+            nameEl.textContent = row.name;
+            const comboEl = document.createElement('div');
+            comboEl.className = 'text-[11px] text-slate-400 truncate';
+            comboEl.textContent =
+                row.ingredientAText && row.ingredientBText
+                    ? `${row.ingredientAEmoji || '·'} ${row.ingredientAText} + ${row.ingredientBEmoji || '·'} ${row.ingredientBText}`
+                    : 'Starter item';
+            textWrap.appendChild(nameEl);
+            textWrap.appendChild(comboEl);
+            head.appendChild(textWrap);
+            card.appendChild(head);
+
+            const controls = document.createElement('div');
+            controls.className = 'mt-2 flex items-center gap-1.5 flex-wrap';
+            const upvotes = Math.max(0, Number(row.upvotes || 0) | 0);
+            const downvotes = Math.max(0, Number(row.downvotes || 0) | 0);
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'vote-pill vote-pill--down';
+            deleteBtn.setAttribute('data-discovery-delete-btn', '1');
+            deleteBtn.setAttribute('data-id', row.id);
+            deleteBtn.textContent = 'Delete';
+            controls.appendChild(deleteBtn);
+            const upBtn = document.createElement('button');
+            upBtn.type = 'button';
+            upBtn.className = 'vote-pill vote-pill--up';
+            upBtn.setAttribute('data-discovery-vote-btn', '1');
+            upBtn.setAttribute('data-vote', 'up');
+            upBtn.setAttribute('data-id', row.id);
+            upBtn.textContent = `👍 ${upvotes}`;
+            controls.appendChild(upBtn);
+            const downBtn = document.createElement('button');
+            downBtn.type = 'button';
+            downBtn.className = 'vote-pill vote-pill--down';
+            downBtn.setAttribute('data-discovery-vote-btn', '1');
+            downBtn.setAttribute('data-vote', 'down');
+            downBtn.setAttribute('data-id', row.id);
+            downBtn.textContent = `👎 ${downvotes}`;
+            controls.appendChild(downBtn);
+            const proposalBtn = document.createElement('button');
+            proposalBtn.type = 'button';
+            proposalBtn.className = 'vote-pill vote-pill--up';
+            proposalBtn.setAttribute('data-discovery-proposal-open-btn', '1');
+            proposalBtn.setAttribute('data-id', row.id);
+            proposalBtn.textContent = '🗳️ Vote';
+            controls.appendChild(proposalBtn);
+            card.appendChild(controls);
+
+            if (globalDiscoveriesExpandedId === row.id) {
+                const expanded = document.createElement('div');
+                expanded.className = 'mt-2 border border-slate-700 rounded-lg bg-slate-900/60 p-2';
+                expanded.setAttribute('data-discovery-expanded', row.id);
+                const props = discoveryProposalsByItem[row.id] || [];
+                if (!props.length) {
+                    const none = document.createElement('div');
+                    none.className = 'text-xs text-slate-500';
+                    none.textContent = 'No active proposals yet. Use Vote... to start one.';
+                    expanded.appendChild(none);
+                } else {
+                    props.forEach((p) => {
+                        const line = document.createElement('div');
+                        line.className = 'mb-2 last:mb-0 rounded border border-slate-700 bg-slate-950/50 p-2';
+                        const title = document.createElement('div');
+                        title.className = 'text-xs text-slate-200';
+                        title.textContent = p.proposalType === 'name' ? `Name: ${p.proposedName || ''}` : 'Image proposal';
+                        line.appendChild(title);
+                        if (p.proposalType === 'image' && p.proposedImagePath) {
+                            const img = document.createElement('img');
+                            img.className = 'mt-1 w-16 h-16 object-contain rounded border border-slate-600 bg-slate-900';
+                            img.src = proposalImageSrc(p.proposedImagePath);
+                            img.alt = 'Proposed icon';
+                            line.appendChild(img);
+                        }
+                        const footer = document.createElement('div');
+                        footer.className = 'mt-2 flex items-center gap-1.5';
+                        const up = document.createElement('button');
+                        up.type = 'button';
+                        up.className = `vote-pill ${p.myVote === 1 ? 'vote-pill--selected-up' : 'vote-pill--up'}`;
+                        up.setAttribute('data-discovery-proposal-vote-btn', '1');
+                        up.setAttribute('data-proposal-vote', 'up');
+                        up.setAttribute('data-proposal-id', String(p.id));
+                        up.setAttribute('data-item-id', row.id);
+                        up.textContent = `👍 ${Math.max(0, Number(p.upvotes || 0) | 0)}`;
+                        footer.appendChild(up);
+                        const down = document.createElement('button');
+                        down.type = 'button';
+                        down.className = `vote-pill ${p.myVote === -1 ? 'vote-pill--selected-down' : 'vote-pill--down'}`;
+                        down.setAttribute('data-discovery-proposal-vote-btn', '1');
+                        down.setAttribute('data-proposal-vote', 'down');
+                        down.setAttribute('data-proposal-id', String(p.id));
+                        down.setAttribute('data-item-id', row.id);
+                        down.textContent = `👎 ${Math.max(0, Number(p.downvotes || 0) | 0)}`;
+                        footer.appendChild(down);
+                        line.appendChild(footer);
+                        expanded.appendChild(line);
+                    });
+                }
+                card.appendChild(expanded);
+            }
+
+            scene.appendChild(card);
+            const midY = top + 44;
+            posById[row.id] = { left, top, midY };
+            maxBottom = Math.max(maxBottom, top + card.offsetHeight);
+        }
+
+        const sceneHeight = Math.max(260, maxBottom + padY);
+        scene.style.height = `${sceneHeight}px`;
+        svg.setAttribute('width', String(padX * 2 + maxDepth * xStep + nodeWidth));
+        svg.setAttribute('height', String(sceneHeight));
+
+        for (const [parentId, children] of Object.entries(childrenByParent)) {
+            const pPos = posById[parentId];
+            if (!pPos) continue;
+            for (const childId of children) {
+                const cPos = posById[childId];
+                if (!cPos) continue;
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                const x1 = pPos.left + nodeWidth;
+                const y1 = pPos.midY;
+                const x2 = cPos.left;
+                const y2 = cPos.midY;
+                const cx = (x1 + x2) / 2;
+                path.setAttribute('d', `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`);
+                path.setAttribute('stroke', 'rgba(100,116,139,0.85)');
+                path.setAttribute('stroke-width', '2');
+                path.setAttribute('fill', 'none');
+                svg.appendChild(path);
+            }
         }
 
         if (globalDiscoveriesCountEl) globalDiscoveriesCountEl.textContent = `${total} item${total === 1 ? '' : 's'}`;
@@ -1609,6 +1835,10 @@ function renderGlobalDiscoveriesPage() {
         if (globalDiscoveriesNextBtn) globalDiscoveriesNextBtn.disabled = true;
         return;
     }
+
+    globalDiscoveriesListEl.classList.add('divide-y', 'divide-slate-700/70');
+    globalDiscoveriesListEl.style.overflowX = '';
+    globalDiscoveriesListEl.style.overflowY = '';
 
     const pageCount = Math.max(1, Math.ceil(total / GLOBAL_DISCOVERIES_PER_PAGE));
     globalDiscoveriesPage = Math.max(1, Math.min(pageCount, globalDiscoveriesPage));
