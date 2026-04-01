@@ -262,6 +262,11 @@ function factoryTransporterDir(state, key) {
     return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
 }
 
+function factorySorterDir(state, key) {
+    const d = state.sorterDirs[key];
+    return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
+}
+
 function factoryCombinerDir(state, key) {
     const d = state.combinerDirs[key];
     return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
@@ -273,6 +278,8 @@ function defaultFactoryState() {
         selectedBuilding: null,
         cellResources: {},
         transporterDirs: {},
+        sorterDirs: {},
+        sorterItemFilters: {},
         sizeUpgradeLevel: 0,
         loopMs: FACTORY_LOOP_MS_DEFAULT,
         loopTick: 0,
@@ -307,6 +314,8 @@ function sanitizeFactoryState(raw) {
     st.placements = typeof raw.placements === 'object' && raw.placements ? raw.placements : {};
     st.cellResources = typeof raw.cellResources === 'object' && raw.cellResources ? raw.cellResources : {};
     st.transporterDirs = typeof raw.transporterDirs === 'object' && raw.transporterDirs ? raw.transporterDirs : {};
+    st.sorterDirs = typeof raw.sorterDirs === 'object' && raw.sorterDirs ? raw.sorterDirs : {};
+    st.sorterItemFilters = typeof raw.sorterItemFilters === 'object' && raw.sorterItemFilters ? raw.sorterItemFilters : {};
     st.combinerDirs = typeof raw.combinerDirs === 'object' && raw.combinerDirs ? raw.combinerDirs : {};
     st.cellItems = typeof raw.cellItems === 'object' && raw.cellItems ? raw.cellItems : {};
     st.combinerDiscovery =
@@ -422,6 +431,7 @@ function factoryStep(state, userId = 0) {
         inBounds: (col, row) => Number.isFinite(col) && Number.isFinite(row),
         getResourceId: (col, row) => factoryCellResourceId(state, col, row),
         getTransporterDir: (key) => factoryTransporterDir(state, key),
+        getSorterDir: (key) => factorySorterDir(state, key),
         getCombinerDir: (key) => factoryCombinerDir(state, key),
         resolveRecipeId: (a, b) => recipeIndex[[a, b].sort().join('+')] || null
     });
@@ -586,6 +596,8 @@ function factoryClientSnapshot(state) {
         selectedBuilding: state.selectedBuilding || null,
         cellResources: state.cellResources || {},
         transporterDirs: state.transporterDirs || {},
+        sorterDirs: state.sorterDirs || {},
+        sorterItemFilters: state.sorterItemFilters || {},
         sizeUpgradeLevel: Number(state.sizeUpgradeLevel || 0) | 0,
         loopMs: factoryLoopIntervalMs(state),
         loopTick: Number(state.loopTick || 0) | 0,

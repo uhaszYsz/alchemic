@@ -45,9 +45,19 @@ export function simulateFactoryStep(state, deps) {
     const inBounds = deps.inBounds;
     const getResourceId = deps.getResourceId;
     const getTransporterDir = deps.getTransporterDir;
+    const getSorterDir = deps.getSorterDir;
     const getCombinerDir = deps.getCombinerDir;
     const resolveRecipeId = deps.resolveRecipeId;
     const loopTick = Number(state.loopTick || 0) | 0;
+    const sorterItemFilters =
+        state.sorterItemFilters && typeof state.sorterItemFilters === 'object' ? state.sorterItemFilters : {};
+    state.sorterItemFilters = sorterItemFilters;
+    const rotateStart = (destKey, count, pass) => {
+        let h = 0;
+        const s = String(destKey || '');
+        for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+        return ((h + loopTick + pass) >>> 0) % Math.max(1, count);
+    };
 
     const work = {};
     for (const [k, v] of Object.entries(state.cellItems || {})) {
@@ -78,26 +88,62 @@ export function simulateFactoryStep(state, deps) {
     }
 
     const deposits = [];
+    const sorterPulls = [];
     const movesTTCandidates = [];
     const movesToEmptyCombinerCandidates = [];
     const movesTT = [];
     const movesToEmptyCombiner = [];
     const combinerFeeds = [];
 
+    for (const [sorterKey, p] of Object.entries(state.placements || {})) {
+        if (p !== 'sorter') continue;
+        if (work[sorterKey]) continue;
+        const sc = factoryKeyToColRow(sorterKey);
+        if (!Number.isFinite(sc.col) || !Number.isFinite(sc.row)) continue;
+        const filterId = typeof sorterItemFilters[sorterKey] === 'string' ? sorterItemFilters[sorterKey] : '';
+        const picks = [];
+        for (let dir = 0; dir < 4; dir++) {
+            const nb = factoryNeighborColRow(sc.col, sc.row, dir);
+            if (!inBounds(nb.col, nb.row)) continue;
+            const fromKey = factoryPlacementKey(nb.col, nb.row);
+            if (state.placements[fromKey] !== 'transporter') continue;
+            const itemId = work[fromKey];
+            if (!itemId) continue;
+            if (filterId && itemId !== filterId) continue;
+            picks.push({ from: fromKey, itemId });
+        }
+        if (!picks.length) continue;
+        picks.sort((a, b) => a.from.localeCompare(b.from));
+        const start = rotateStart(sorterKey, picks.length, 0);
+        let chosen = null;
+        for (let i = 0; i < picks.length; i++) {
+            const cand = picks[(start + i) % picks.length];
+            if (!work[cand.from] || work[cand.from] !== cand.itemId) continue;
+            chosen = cand;
+            break;
+        }
+        if (!chosen) continue;
+        delete work[chosen.from];
+        work[sorterKey] = chosen.itemId;
+        if (!filterId) sorterItemFilters[sorterKey] = chosen.itemId;
+        sorterPulls.push({ from: chosen.from, to: sorterKey, itemId: chosen.itemId });
+    }
+
     for (const [key, p] of Object.entries(state.placements || {})) {
-        if (p !== 'transporter') continue;
+        if (p !== 'transporter' && p !== 'sorter') continue;
         // Keep extractor output on its belt cell for one full tick to maintain visible spacing.
         if (spawnedThisTick.has(key)) continue;
         const itemId = work[key];
         if (!itemId) continue;
         const cell = factoryKeyToColRow(key);
-        const nb = factoryNeighborColRow(cell.col, cell.row, getTransporterDir(key));
+        const outDir = p === 'sorter' ? getSorterDir(key) : getTransporterDir(key);
+        const nb = factoryNeighborColRow(cell.col, cell.row, outDir);
         if (!inBounds(nb.col, nb.row)) continue;
         const destKey = factoryPlacementKey(nb.col, nb.row);
         const destPl = state.placements[destKey];
         if (destPl === 'storage') {
             deposits.push({ from: key, to: destKey, itemId });
-        } else if (destPl === 'transporter') {
+        } else if (destPl === 'transporter' || destPl === 'sorter') {
             movesTTCandidates.push({ from: key, to: destKey, itemId });
         } else if (destPl === 'combiner') {
             if (state.combinerDiscovery && state.combinerDiscovery[destKey]) continue;
@@ -124,12 +170,6 @@ export function simulateFactoryStep(state, deps) {
         else ttByDest.set(m.to, [m]);
     }
     const ttDestKeys = Array.from(ttByDest.keys()).sort();
-    const rotateStart = (destKey, count, pass) => {
-        let h = 0;
-        const s = String(destKey || '');
-        for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
-        return ((h + loopTick + pass) >>> 0) % Math.max(1, count);
-    };
     // Resolve in passes so an item can enter a cell vacated earlier in the same tick.
     for (let pass = 0; pass < movesTTCandidates.length; pass++) {
         let progressed = false;
@@ -207,7 +247,7 @@ export function simulateFactoryStep(state, deps) {
             const nb = factoryNeighborColRow(c.col, c.row, getCombinerDir(f.to));
             if (!inBounds(nb.col, nb.row)) continue;
             const outKey = factoryPlacementKey(nb.col, nb.row);
-            if (state.placements[outKey] !== 'transporter') continue;
+            if (state.placements[outKey] !== 'transporter' && state.placements[outKey] !== 'sorter') continue;
             if (work[outKey]) continue;
             if (claimedDest.has(outKey) || combinerOutClaimed.has(outKey)) continue;
             combinerDestClaimed.add(f.to);
@@ -234,5 +274,5 @@ export function simulateFactoryStep(state, deps) {
         next[k] = v;
     }
     state.cellItems = next;
-    return { invDelta, deposits, combined, spawns, movesTT, movesToEmptyCombiner };
+    return { invDelta, deposits, combined, spawns, sorterPulls, movesTT, movesToEmptyCombiner };
 }
