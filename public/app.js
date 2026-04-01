@@ -2209,8 +2209,7 @@ function factoryNeighborColRow(col, row, dir) {
 
 /** @param {number} col @param {number} row */
 function factoryInBounds(col, row) {
-    const n = factoryGridCols();
-    return Number.isFinite(col) && Number.isFinite(row) && col >= 0 && row >= 0 && col < n && row < n;
+    return Number.isFinite(col) && Number.isFinite(row);
 }
 
 /**
