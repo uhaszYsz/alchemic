@@ -84,6 +84,13 @@ function migrateDiscoveryProposalTables(db) {
     `);
 }
 
+function migrateUsersLastSeenAt(db) {
+    const cols = db.prepare('PRAGMA table_info(users)').all();
+    if (!cols.some((c) => c.name === 'last_seen_at')) {
+        db.exec("ALTER TABLE users ADD COLUMN last_seen_at TEXT");
+    }
+}
+
 export function openDb() {
     const db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
@@ -112,13 +119,22 @@ export function openDb() {
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             password_salt TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_seen_at TEXT
         );
         CREATE TABLE IF NOT EXISTS user_sessions (
             token_hash TEXT PRIMARY KEY NOT NULL,
             user_id INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             expires_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS user_inventory (
+            user_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            qty INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, item_id),
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
         CREATE TABLE IF NOT EXISTS user_factory_state (
@@ -135,6 +151,7 @@ export function openDb() {
     migrateItemsVotes(db);
     migrateItemsUniqueName(db);
     migrateDiscoveryProposalTables(db);
+    migrateUsersLastSeenAt(db);
     const n = db.prepare('SELECT COUNT(*) AS c FROM items').get().c;
     if (n === 0) {
         const ins = db.prepare(
@@ -550,8 +567,8 @@ export function createUser(db, input) {
     try {
         const out = db
             .prepare(
-                `INSERT INTO users (username, password_hash, password_salt)
-                 VALUES (@username, @password_hash, @password_salt)`
+                `INSERT INTO users (username, password_hash, password_salt, last_seen_at)
+                 VALUES (@username, @password_hash, @password_salt, datetime('now'))`
             )
             .run({
                 username: name,
@@ -585,11 +602,19 @@ export function getUserByUsername(db, username) {
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {number} userId
- * @returns {{ id: number, username: string } | null}
+ * @returns {{ id: number, username: string, last_seen_at?: string | null } | null}
  */
 export function getUserById(db, userId) {
-    const row = db.prepare('SELECT id, username FROM users WHERE id = ?').get(Number(userId));
+    const row = db.prepare('SELECT id, username, last_seen_at FROM users WHERE id = ?').get(Number(userId));
     return row || null;
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ */
+export function touchUserLastSeen(db, userId) {
+    db.prepare("UPDATE users SET last_seen_at = datetime('now') WHERE id = ?").run(Number(userId));
 }
 
 /**
@@ -660,4 +685,57 @@ export function saveUserFactoryState(db, userId, stateJson) {
 export function loadUserFactoryState(db, userId) {
     const row = db.prepare('SELECT state_json FROM user_factory_state WHERE user_id = ?').get(Number(userId));
     return row ? String(row.state_json) : null;
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @returns {Record<string, number>}
+ */
+export function getUserInventoryMap(db, userId) {
+    const uid = Number(userId) | 0;
+    if (!uid) return {};
+    const rows = db
+        .prepare(
+            `SELECT item_id, qty
+             FROM user_inventory
+             WHERE user_id = @uid
+               AND qty > 0`
+        )
+        .all({ uid });
+    const out = {};
+    for (const row of rows) {
+        const id = String(row.item_id || '').trim();
+        const qty = Number(row.qty || 0) | 0;
+        if (!id || qty <= 0) continue;
+        out[id] = qty;
+    }
+    return out;
+}
+
+/**
+ * Add positive deltas to a user's inventory.
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @param {Record<string, number>} deltas
+ */
+export function addToUserInventory(db, userId, deltas) {
+    const uid = Number(userId) | 0;
+    if (!uid || !deltas || typeof deltas !== 'object') return;
+    const upsert = db.prepare(
+        `INSERT INTO user_inventory (user_id, item_id, qty, updated_at)
+         VALUES (@user_id, @item_id, @qty, datetime('now'))
+         ON CONFLICT(user_id, item_id) DO UPDATE SET
+            qty = qty + excluded.qty,
+            updated_at = datetime('now')`
+    );
+    const tx = db.transaction((changes) => {
+        for (const [itemId, rawQty] of Object.entries(changes)) {
+            const id = String(itemId || '').trim();
+            const qty = Math.floor(Number(rawQty));
+            if (!id || !Number.isFinite(qty) || qty <= 0) continue;
+            upsert.run({ user_id: uid, item_id: id, qty });
+        }
+    });
+    tx(deltas);
 }

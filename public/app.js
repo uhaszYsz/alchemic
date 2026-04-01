@@ -26,6 +26,12 @@ const state = {
     activeWorkspace: 'lab',
     /** Crafted / factory output counts; separate from the discovery library. */
     playerInventory: {},
+    /** Server runtime status for this user's factory. */
+    factoryRuntime: {
+        running: false,
+        remainingMs: 0,
+        runStoppedAt: null
+    },
     factory: {
         /** @type {Record<string, 'transporter' | 'extractor' | 'combiner' | 'storage'>} key "col,row" */
         placements: {},
@@ -76,6 +82,8 @@ const state = {
     auth: {
         token: '',
         username: '',
+        playerPingTimerId: null,
+        factoryRuntimeTimerId: null,
         enteringFactory: false
     },
     /** comboKey -> true; user cancelled naming earlier */
@@ -129,6 +137,34 @@ function emojiForItemId(id) {
     if (typeof item.emoji === 'string') return item.emoji;
     const { icon } = splitLabel(item.name);
     return icon;
+}
+
+const factoryIconImageCache = new Map();
+
+/** @param {string} itemId */
+function factoryGetLoadedIconImage(itemId) {
+    const id = String(itemId || '').trim();
+    if (!id) return null;
+    const item = state.library.find((e) => e.id === id);
+    if (!item) return null;
+    const src = iconSrcForItem(item);
+    if (!src) return null;
+    let rec = factoryIconImageCache.get(src);
+    if (!rec) {
+        const img = new Image();
+        rec = { img, ready: false, failed: false };
+        factoryIconImageCache.set(src, rec);
+        img.onload = () => {
+            rec.ready = true;
+            if (state.activeWorkspace === 'factory') factoryStartRenderLoop();
+        };
+        img.onerror = () => {
+            rec.failed = true;
+        };
+        img.src = src;
+    }
+    if (rec.failed || !rec.ready) return null;
+    return rec.img;
 }
 
 function useLocalProxy() {
@@ -688,6 +724,25 @@ function addItemsToPlayerInventory(deltas) {
     if (any) {
         renderPlayerInventory();
     }
+}
+
+/** @param {any} raw */
+function normalizeInventoryMap(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    const out = {};
+    for (const [id, q] of Object.entries(raw)) {
+        const key = String(id || '').trim();
+        const qty = Math.floor(Number(q));
+        if (!key || !Number.isFinite(qty) || qty <= 0) continue;
+        out[key] = qty;
+    }
+    return out;
+}
+
+/** @param {any} raw */
+function applyServerInventorySnapshot(raw) {
+    state.playerInventory = normalizeInventoryMap(raw);
+    renderPlayerInventory();
 }
 
 const INVENTORY_GRID_SLOTS = 100;
@@ -1571,6 +1626,7 @@ const authLoginBtn = document.getElementById('auth-login-btn');
 const authRegisterBtn = document.getElementById('auth-register-btn');
 const authLogoutBtn = document.getElementById('auth-logout-btn');
 const authUserPillEl = document.getElementById('auth-user-pill');
+const factoryRuntimeStatusEl = document.getElementById('factory-runtime-status');
 const openGlobalDiscoveriesBtn = document.getElementById('open-global-discoveries');
 const openDbViewerBtn = document.getElementById('open-db-viewer');
 const openProfileBtn = document.getElementById('open-profile');
@@ -1664,6 +1720,102 @@ function applyLoggedInUi() {
         authUserPillEl.classList.toggle('hidden', !has);
         authUserPillEl.textContent = has ? `@${state.auth.username || 'player'}` : '';
     }
+    if (factoryRuntimeStatusEl) {
+        factoryRuntimeStatusEl.classList.toggle('hidden', !state.auth.token);
+    }
+    renderFactoryRuntimeStatus();
+}
+
+/** @param {number} ms */
+function formatMmSs(ms) {
+    const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+/** @param {any} runtime */
+function applyFactoryRuntime(runtime) {
+    const r = runtime && typeof runtime === 'object' ? runtime : {};
+    state.factoryRuntime = {
+        running: r.running === true,
+        remainingMs: Math.max(0, Number(r.remainingMs || 0)),
+        runStoppedAt: typeof r.runStoppedAt === 'string' && r.runStoppedAt.trim() ? r.runStoppedAt : null
+    };
+    renderFactoryRuntimeStatus();
+}
+
+function renderFactoryRuntimeStatus() {
+    if (!factoryRuntimeStatusEl) return;
+    if (!state.auth.token) {
+        factoryRuntimeStatusEl.textContent = '';
+        return;
+    }
+    const rt = state.factoryRuntime || {};
+    if (rt.running) {
+        factoryRuntimeStatusEl.textContent = `Factory run: ${formatMmSs(rt.remainingMs)} left`;
+        return;
+    }
+    if (rt.runStoppedAt) {
+        factoryRuntimeStatusEl.textContent = 'Factory run stopped';
+        return;
+    }
+    factoryRuntimeStatusEl.textContent = 'Factory idle';
+}
+
+async function pullFactoryRuntimeStatus() {
+    if (!state.auth.token) return;
+    try {
+        const r = await apiFetch('/api/factory/runtime');
+        if (!r.ok) return;
+        const payload = await r.json();
+        if (payload && payload.runtime) applyFactoryRuntime(payload.runtime);
+    } catch {
+        /* ignore */
+    }
+}
+
+function startFactoryRuntimeSyncLoop() {
+    if (!state.auth.token) return;
+    if (state.auth.factoryRuntimeTimerId != null) return;
+    state.auth.factoryRuntimeTimerId = setInterval(() => {
+        if (state.activeWorkspace === 'factory') {
+            void pullFactoryRuntimeStatus();
+        }
+    }, 10000);
+    if (state.activeWorkspace === 'factory') {
+        void pullFactoryRuntimeStatus();
+    }
+}
+
+function stopFactoryRuntimeSyncLoop() {
+    if (state.auth.factoryRuntimeTimerId == null) return;
+    clearInterval(state.auth.factoryRuntimeTimerId);
+    state.auth.factoryRuntimeTimerId = null;
+}
+
+async function postPlayerPing() {
+    if (!state.auth.token) return;
+    try {
+        await apiFetch('/api/player/ping', { method: 'POST' });
+    } catch {
+        /* ignore transient network failures */
+    }
+}
+
+function startPlayerPingLoop() {
+    if (!state.auth.token) return;
+    if (state.auth.playerPingTimerId != null) return;
+    state.auth.playerPingTimerId = setInterval(() => {
+        void postPlayerPing();
+    }, 20000);
+    void postPlayerPing();
+}
+
+function stopPlayerPingLoop() {
+    if (state.auth.playerPingTimerId == null) return;
+    clearInterval(state.auth.playerPingTimerId);
+    state.auth.playerPingTimerId = null;
 }
 
 function normalizeFactoryFromServer(factory) {
@@ -1727,11 +1879,24 @@ async function flushFactoryStateToServer() {
     try {
         do {
             factoryStateSyncQueued = false;
-            await apiFetch('/api/factory/state', {
+            const r = await apiFetch('/api/factory/state', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ factory: buildFactoryPayload() })
             });
+            if (r.ok) {
+                try {
+                    const payload = await r.json();
+                    if (payload && typeof payload === 'object' && payload.inventory) {
+                        applyServerInventorySnapshot(payload.inventory);
+                    }
+                    if (payload && typeof payload === 'object' && payload.runtime) {
+                        applyFactoryRuntime(payload.runtime);
+                    }
+                } catch {
+                    /* ignore non-json responses */
+                }
+            }
         } while (factoryStateSyncQueued);
     } catch {
         /* ignore transient network failures */
@@ -1749,6 +1914,12 @@ async function pullFactoryStateFromServer() {
     if (!r.ok) throw new Error(await r.text());
     const payload = await r.json();
     normalizeFactoryFromServer(payload && payload.factory ? payload.factory : null);
+    if (payload && typeof payload === 'object' && payload.inventory) {
+        applyServerInventorySnapshot(payload.inventory);
+    }
+    if (payload && typeof payload === 'object' && payload.runtime) {
+        applyFactoryRuntime(payload.runtime);
+    }
 }
 
 async function runAuthRequest(path) {
@@ -1773,12 +1944,20 @@ async function runAuthRequest(path) {
         const payload = await r.json();
         state.auth.token = String(payload.token || '');
         state.auth.username = String(payload.username || username);
+        if (payload && typeof payload === 'object' && payload.inventory) {
+            applyServerInventorySnapshot(payload.inventory);
+        }
+        if (payload && typeof payload === 'object' && payload.runtime) {
+            applyFactoryRuntime(payload.runtime);
+        }
         if (!state.auth.token) {
             setAuthStatus('Invalid auth response.');
             return false;
         }
         storeSessionToken(state.auth.token);
         applyLoggedInUi();
+        startPlayerPingLoop();
+        startFactoryRuntimeSyncLoop();
         setAuthVisible(false);
         setAuthStatus('');
         return true;
@@ -3049,19 +3228,27 @@ function factoryDrawItemSlides(ctx, L, sc, now) {
         const toPt = factoryCellCenterCss(cr.col, cr.row, L);
         const x = fromPt.x + (toPt.x - fromPt.x) * p;
         const y = fromPt.y + (toPt.y - fromPt.y) * p;
-        const icon = emojiForItemId(itemId);
-        if (!icon) continue;
-
         ctx.save();
-        const fsz = Math.max(6, 20 * sc);
-        ctx.font = `${fsz}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
         ctx.shadowColor = 'rgba(0,0,0,0.55)';
         ctx.shadowBlur = 5 * sc;
         ctx.shadowOffsetY = 1;
-        ctx.fillStyle = '#f8fafc';
-        ctx.fillText(icon, x, y);
+        const iconImg = factoryGetLoadedIconImage(itemId);
+        if (iconImg) {
+            const sz = Math.max(8, 19 * sc);
+            ctx.drawImage(iconImg, x - sz / 2, y - sz / 2, sz, sz);
+        } else {
+            const icon = emojiForItemId(itemId);
+            if (!icon) {
+                ctx.restore();
+                continue;
+            }
+            const fsz = Math.max(6, 20 * sc);
+            ctx.font = `${fsz}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillText(icon, x, y);
+        }
         ctx.restore();
     }
 }
@@ -3430,9 +3617,11 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     const placement = state.factory.placements[key];
     const resId = factoryCellResourceId(col, row);
     const resIcon = resId ? emojiForItemId(resId) : '';
+    const resImg = resId ? factoryGetLoadedIconImage(resId) : null;
     const hasRes = Boolean(resId);
     const carryId = state.factory.cellItems[key];
     const carryIcon = carryId ? emojiForItemId(carryId) : '';
+    const carryImg = carryId ? factoryGetLoadedIconImage(carryId) : null;
     const slideP = factoryItemSlideProgress(key, performance.now());
     const hideCarryForSlide = slideP !== null && slideP < 1;
 
@@ -3453,15 +3642,20 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
 
-    if (!placement && hasRes && resIcon) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.font = fs(22);
+    if (!placement && hasRes && (resImg || resIcon)) {
         ctx.shadowColor = 'rgba(0,0,0,0.2)';
         ctx.shadowBlur = 3 * sc;
         ctx.shadowOffsetY = 1;
-        ctx.fillStyle = '#1c1917';
-        ctx.fillText(resIcon, midX, midY);
+        if (resImg) {
+            const sz = Math.min(w, h) * 0.62;
+            ctx.drawImage(resImg, midX - sz / 2, midY - sz / 2, sz, sz);
+        } else {
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = fs(22);
+            ctx.fillStyle = '#1c1917';
+            ctx.fillText(resIcon, midX, midY);
+        }
         ctx.shadowBlur = 0;
     }
 
@@ -3591,14 +3785,19 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.stroke();
     }
 
-    if (placement && hasRes && resIcon) {
-        ctx.textAlign = 'right';
-        ctx.textBaseline = 'bottom';
-        ctx.font = fs(11);
+    if (placement && hasRes && (resImg || resIcon)) {
         ctx.shadowColor = 'rgba(0,0,0,0.25)';
         ctx.shadowBlur = 2 * sc;
-        ctx.fillStyle = '#292524';
-        ctx.fillText(resIcon, w - 2, h - 1);
+        if (resImg) {
+            const sz = Math.max(8, 11 * sc);
+            ctx.drawImage(resImg, w - sz - 1, h - sz - 1, sz, sz);
+        } else {
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'bottom';
+            ctx.font = fs(11);
+            ctx.fillStyle = '#292524';
+            ctx.fillText(resIcon, w - 2, h - 1);
+        }
         ctx.shadowBlur = 0;
     }
 
@@ -3612,15 +3811,20 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.shadowBlur = 10 * sc;
         ctx.fillText('!', midX, midY);
         ctx.shadowBlur = 0;
-    } else if (carryIcon && placement !== 'storage' && !hideCarryForSlide) {
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
+    } else if ((carryImg || carryIcon) && placement !== 'storage' && !hideCarryForSlide) {
         ctx.shadowColor = 'rgba(0,0,0,0.45)';
         ctx.shadowBlur = 4 * sc;
         ctx.shadowOffsetY = 1;
-        ctx.font = fs(20);
-        ctx.fillStyle = '#fafaf9';
-        ctx.fillText(carryIcon, midX, midY);
+        if (carryImg) {
+            const sz = Math.max(8, 19 * sc);
+            ctx.drawImage(carryImg, midX - sz / 2, midY - sz / 2, sz, sz);
+        } else {
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = fs(20);
+            ctx.fillStyle = '#fafaf9';
+            ctx.fillText(carryIcon, midX, midY);
+        }
         ctx.shadowBlur = 0;
     }
 
@@ -3769,6 +3973,10 @@ function factoryStopRenderLoop() {
 
 if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && state.auth.token) {
+            void postPlayerPing();
+            if (state.activeWorkspace === 'factory') void pullFactoryRuntimeStatus();
+        }
         if (document.visibilityState === 'visible' && state.activeWorkspace === 'factory') {
             factoryStartRenderLoop();
         } else if (document.hidden) {
@@ -3905,10 +4113,12 @@ function setWorkspace(which) {
                     state.auth.enteringFactory = false;
                     renderFactoryGrid();
                     startFactoryLoop();
+                    void pullFactoryRuntimeStatus();
                 });
         } else {
             renderFactoryGrid();
             startFactoryLoop();
+            void pullFactoryRuntimeStatus();
         }
     } else {
         stopFactoryLoop();
@@ -4404,6 +4614,20 @@ if (toggleInventoryBtn && inventoryPanelEl) {
         inventoryPanelEl.classList.toggle('hidden');
         const open = !inventoryPanelEl.classList.contains('hidden');
         toggleInventoryBtn.setAttribute('aria-expanded', String(open));
+        if (open && state.auth.token) {
+            void apiFetch('/api/inventory/open', { method: 'POST' })
+                .then(async (r) => {
+                    if (!r.ok) return;
+                    const payload = await r.json();
+                    if (payload && payload.inventory) applyServerInventorySnapshot(payload.inventory);
+                    if (payload && payload.runtime) applyFactoryRuntime(payload.runtime);
+                    const granted = payload && typeof payload === 'object' ? payload.granted : null;
+                    if (granted && typeof granted === 'object' && Object.keys(granted).length > 0) {
+                        console.log('[inventory-open granted]', granted);
+                    }
+                })
+                .catch(() => {});
+        }
         requestAnimationFrame(() => {
             window.dispatchEvent(new Event('resize'));
             if (state.activeWorkspace === 'factory') {
@@ -5057,9 +5281,13 @@ if (authLogoutBtn) {
         state.pendingDiscoveryNotices = [];
         state.deferredDiscoveries = {};
         state.pendingCombination = null;
+        state.playerInventory = {};
         setDeferredDiscoveryPrompt(null);
         updateFloatingDiscoveryAlert(false);
         applyLoggedInUi();
+        stopPlayerPingLoop();
+        stopFactoryRuntimeSyncLoop();
+        renderPlayerInventory();
         storeSessionToken('');
         void fetch(`${apiOrigin()}/api/auth/logout`, {
             method: 'POST',
@@ -5124,16 +5352,23 @@ async function initAuthThenBoot() {
             if (r.ok) {
                 const payload = await r.json();
                 if (payload && payload.username) state.auth.username = String(payload.username);
+                if (payload && payload.inventory) applyServerInventorySnapshot(payload.inventory);
                 applyLoggedInUi();
+                startPlayerPingLoop();
+                startFactoryRuntimeSyncLoop();
                 setAuthVisible(false);
             } else {
                 state.auth.token = '';
                 storeSessionToken('');
+                stopPlayerPingLoop();
+                stopFactoryRuntimeSyncLoop();
                 setAuthVisible(true);
             }
         } catch {
             state.auth.token = '';
             storeSessionToken('');
+            stopPlayerPingLoop();
+            stopFactoryRuntimeSyncLoop();
             setAuthVisible(true);
         }
     } else {

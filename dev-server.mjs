@@ -22,9 +22,12 @@ import {
     createUser,
     getUserByUsername,
     getUserById,
+    touchUserLastSeen,
     upsertSession,
     getSessionByTokenHash,
-    deleteSessionByTokenHash
+    deleteSessionByTokenHash,
+    getUserInventoryMap,
+    addToUserInventory
 } from './db.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -60,6 +63,8 @@ const FACTORY_GRID_BASE = 8;
 const FACTORY_LOOP_MS_DEFAULT = 500;
 const MIN_FACTORY_LOOP_MS = 33;
 const MAX_FACTORY_SIZE_LEVEL = 10;
+const PLAYER_TIMEOUT_MS = 60 * 1000;
+const FACTORY_RUN_WINDOW_MS = 2 * 60 * 1000;
 
 const db = openDb();
 const publicRoot = path.join(__dirname, 'public');
@@ -67,6 +72,8 @@ const imagesRoot = path.join(__dirname, 'images');
 
 /** @type {Map<number, any>} */
 const factoryStateByUser = new Map();
+/** @type {Map<number, number>} user id -> last ping/activity ms */
+const playerLastSeenAt = new Map();
 let recipeIndex = buildRecipeIndex(getItemsMap(db));
 
 const CORS_API = {
@@ -157,7 +164,16 @@ function authenticate(req) {
         deleteSessionByTokenHash(db, tokenHash);
         return null;
     }
-    return { userId: Number(session.user_id), token, tokenHash };
+    const userId = Number(session.user_id);
+    touchUserLastSeen(db, userId);
+    playerLastSeenAt.set(userId, Date.now());
+    return { userId, token, tokenHash };
+}
+
+function isPlayerTimedOut(userId, now = Date.now()) {
+    const uid = Number(userId) | 0;
+    const last = Number(playerLastSeenAt.get(uid) || 0);
+    return !last || now - last > PLAYER_TIMEOUT_MS;
 }
 
 function buildRecipeIndex(items) {
@@ -234,7 +250,12 @@ function defaultFactoryState() {
         cameraY: (FACTORY_GRID_BASE - 1) / 2,
         cameraZoom: 1,
         _serverLastTickAt: Date.now(),
-        _serverAccumulatorMs: 0
+        _serverAccumulatorMs: 0,
+        _factoryLastChangedAt: 0,
+        _factoryRunUntilAt: 0,
+        _factoryRunStartedAt: 0,
+        _factoryRunStoppedAtIso: null,
+        _factoryPendingProduced: {}
     };
 }
 
@@ -259,7 +280,39 @@ function sanitizeFactoryState(raw) {
     st.loopMs = factoryLoopIntervalMs(st);
     st._serverLastTickAt = Date.now();
     st._serverAccumulatorMs = 0;
+    st._factoryLastChangedAt = Number(raw._factoryLastChangedAt || 0) || 0;
+    st._factoryRunUntilAt = Number(raw._factoryRunUntilAt || 0) || 0;
+    st._factoryRunStartedAt = Number(raw._factoryRunStartedAt || 0) || 0;
+    st._factoryRunStoppedAtIso =
+        typeof raw._factoryRunStoppedAtIso === 'string' && raw._factoryRunStoppedAtIso.trim()
+            ? raw._factoryRunStoppedAtIso.trim()
+            : null;
+    st._factoryPendingProduced =
+        typeof raw._factoryPendingProduced === 'object' && raw._factoryPendingProduced ? raw._factoryPendingProduced : {};
     return st;
+}
+
+function activateFactoryRunWindow(state, now = Date.now()) {
+    state._factoryLastChangedAt = now;
+    state._factoryRunUntilAt = now + FACTORY_RUN_WINDOW_MS;
+    state._factoryRunStartedAt = now;
+    state._factoryRunStoppedAtIso = null;
+    if (!state._factoryPendingProduced || typeof state._factoryPendingProduced !== 'object') {
+        state._factoryPendingProduced = {};
+    }
+}
+
+function factoryRuntimeStatus(state, now = Date.now()) {
+    const runUntil = Number(state._factoryRunUntilAt || 0);
+    const running = runUntil > now;
+    return {
+        running,
+        runUntilAt: runUntil > 0 ? new Date(runUntil).toISOString() : null,
+        runStartedAt:
+            Number(state._factoryRunStartedAt || 0) > 0 ? new Date(Number(state._factoryRunStartedAt)).toISOString() : null,
+        runStoppedAt: state._factoryRunStoppedAtIso || null,
+        remainingMs: running ? Math.max(0, runUntil - now) : 0
+    };
 }
 
 function factoryStep(state) {
@@ -284,6 +337,7 @@ function factoryStep(state) {
             break;
         }
     }
+    const invDelta = {};
     for (const [key, p] of Object.entries(state.placements || {})) {
         if (p !== 'transporter') continue;
         const itemId = work[key];
@@ -295,6 +349,7 @@ function factoryStep(state) {
         const dest = factoryPlacementKey(nb.col, nb.row);
         const destPl = state.placements[dest];
         if (destPl === 'storage') {
+            invDelta[itemId] = (invDelta[itemId] || 0) + 1;
             delete work[key];
         } else if (destPl === 'transporter' && !work[dest]) {
             work[dest] = itemId;
@@ -331,24 +386,61 @@ function factoryStep(state) {
     }
     state.cellItems = work;
     state.loopTick = (Number(state.loopTick || 0) | 0) + 1;
+    return invDelta;
 }
 
 function tickAllFactories() {
     const now = Date.now();
-    for (const st of factoryStateByUser.values()) {
+    for (const [userId, st] of factoryStateByUser.entries()) {
+        const runUntil = Number(st._factoryRunUntilAt || 0);
+        if (!runUntil || runUntil <= 0) continue;
+        if (now >= runUntil) {
+            if (!st._factoryRunStoppedAtIso) {
+                st._factoryRunStoppedAtIso = new Date(now).toISOString();
+            }
+            st._factoryRunUntilAt = 0;
+            st._factoryRunStartedAt = 0;
+            continue;
+        }
         const elapsed = Math.max(0, now - Number(st._serverLastTickAt || now));
         st._serverLastTickAt = now;
         st._serverAccumulatorMs = Number(st._serverAccumulatorMs || 0) + elapsed;
         const stepMs = factoryLoopIntervalMs(st);
         let guard = 0;
+        const totalDelta = {};
         while (st._serverAccumulatorMs >= stepMs && guard < 20) {
             st._serverAccumulatorMs -= stepMs;
-            factoryStep(st);
+            const delta = factoryStep(st) || {};
+            for (const [itemId, qty] of Object.entries(delta)) {
+                totalDelta[itemId] = (totalDelta[itemId] || 0) + (Number(qty) | 0);
+            }
             guard++;
+        }
+        if (Object.keys(totalDelta).length) {
+            if (!st._factoryPendingProduced || typeof st._factoryPendingProduced !== 'object') {
+                st._factoryPendingProduced = {};
+            }
+            for (const [itemId, qty] of Object.entries(totalDelta)) {
+                const n = Number(qty) | 0;
+                if (!itemId || n <= 0) continue;
+                st._factoryPendingProduced[itemId] = (Number(st._factoryPendingProduced[itemId] || 0) | 0) + n;
+            }
         }
     }
 }
 setInterval(tickAllFactories, 100);
+
+function sanitizeInventoryMap(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    const out = {};
+    for (const [id, q] of Object.entries(raw)) {
+        const key = String(id || '').trim();
+        const qty = Math.floor(Number(q));
+        if (!key || !Number.isFinite(qty) || qty <= 0) continue;
+        out[key] = qty;
+    }
+    return out;
+}
 
 function getOrInitFactoryState(userId) {
     const uid = Number(userId);
@@ -946,7 +1038,18 @@ const server = http.createServer((req, res) => {
                 const token = randomTokenHex(32);
                 upsertSession(db, { tokenHash: sha256Hex(token), userId: user.id, expiresAtIso: sessionExpiryIso() });
                 getOrInitFactoryState(user.id);
-                sendJson(res, 200, { ok: true, token, username: user.username }, CORS_API);
+                sendJson(
+                    res,
+                    200,
+                    {
+                        ok: true,
+                        token,
+                        username: user.username,
+                        inventory: getUserInventoryMap(db, user.id),
+                        lastSeen: new Date().toISOString()
+                    },
+                    CORS_API
+                );
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;
@@ -970,7 +1073,18 @@ const server = http.createServer((req, res) => {
                     expiresAtIso: sessionExpiryIso()
                 });
                 getOrInitFactoryState(user.id);
-                sendJson(res, 200, { ok: true, token, username: user.username }, CORS_API);
+                sendJson(
+                    res,
+                    200,
+                    {
+                        ok: true,
+                        token,
+                        username: user.username,
+                        inventory: getUserInventoryMap(db, user.id),
+                        lastSeen: new Date().toISOString()
+                    },
+                    CORS_API
+                );
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;
@@ -984,7 +1098,61 @@ const server = http.createServer((req, res) => {
         }
         const user = getUserById(db, auth.userId);
         getOrInitFactoryState(auth.userId);
-        sendJson(res, 200, { ok: true, userId: auth.userId, username: user ? user.username : '' }, CORS_API);
+        sendJson(
+            res,
+            200,
+            {
+                ok: true,
+                userId: auth.userId,
+                username: user ? user.username : '',
+                inventory: getUserInventoryMap(db, auth.userId),
+                lastSeen: user && user.last_seen_at ? new Date(String(user.last_seen_at)).toISOString() : null
+            },
+            CORS_API
+        );
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/player/ping') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        playerLastSeenAt.set(auth.userId, Date.now());
+        sendJson(res, 200, { ok: true, timeoutMs: PLAYER_TIMEOUT_MS, serverNow: Date.now() }, CORS_API);
+        return;
+    }
+
+    if (req.method === 'GET' && pathOnly === '/api/factory/runtime') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        const st = getOrInitFactoryState(auth.userId);
+        sendJson(res, 200, { ok: true, serverNow: Date.now(), runtime: factoryRuntimeStatus(st) }, CORS_API);
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/inventory/open') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        const st = getOrInitFactoryState(auth.userId);
+        const pending = sanitizeInventoryMap(st._factoryPendingProduced);
+        const canGrant = !!st._factoryRunStoppedAtIso && Object.keys(pending).length > 0;
+        let granted = {};
+        if (canGrant) {
+            addToUserInventory(db, auth.userId, pending);
+            granted = pending;
+            st._factoryPendingProduced = {};
+            console.log(`[inventory-open grant] user=${auth.userId} granted=${JSON.stringify(granted)}`);
+        }
+        sendJson(
+            res,
+            200,
+            {
+                ok: true,
+                inventory: getUserInventoryMap(db, auth.userId),
+                granted,
+                runtime: factoryRuntimeStatus(st)
+            },
+            CORS_API
+        );
         return;
     }
 
@@ -1006,6 +1174,7 @@ const server = http.createServer((req, res) => {
             200,
             {
                 username: String(user.username || ''),
+                lastSeen: user.last_seen_at ? new Date(String(user.last_seen_at)).toISOString() : null,
                 topDiscoveries
             },
             CORS_API
@@ -1016,7 +1185,12 @@ const server = http.createServer((req, res) => {
         const auth = authenticate(req);
         if (!auth) return send(res, 401, 'unauthorized', CORS_API);
         const st = getOrInitFactoryState(auth.userId);
-        sendJson(res, 200, { factory: factoryClientSnapshot(st) }, { 'Cache-Control': 'no-store', ...CORS_API });
+        sendJson(
+            res,
+            200,
+            { factory: factoryClientSnapshot(st), inventory: getUserInventoryMap(db, auth.userId), runtime: factoryRuntimeStatus(st) },
+            { 'Cache-Control': 'no-store', ...CORS_API }
+        );
         return;
     }
 
@@ -1029,9 +1203,22 @@ const server = http.createServer((req, res) => {
                 if (!body || typeof body.factory !== 'object' || !body.factory) {
                     return send(res, 400, 'factory required', CORS_API);
                 }
+                const prev = getOrInitFactoryState(auth.userId);
                 const st = sanitizeFactoryState(body.factory);
+                st._factoryPendingProduced = sanitizeInventoryMap(prev._factoryPendingProduced);
+                st._factoryRunStoppedAtIso = prev._factoryRunStoppedAtIso || null;
+                activateFactoryRunWindow(st, Date.now());
                 factoryStateByUser.set(auth.userId, st);
-                sendJson(res, 200, { ok: true }, CORS_API);
+                sendJson(
+                    res,
+                    200,
+                    {
+                        ok: true,
+                        inventory: sanitizeInventoryMap(getUserInventoryMap(db, auth.userId)),
+                        runtime: factoryRuntimeStatus(st)
+                    },
+                    CORS_API
+                );
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;
