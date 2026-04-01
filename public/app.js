@@ -1881,6 +1881,8 @@ const discoveryImageProposalPreviewEl = /** @type {HTMLImageElement | null} */ (
 
 /** @type {null | ReturnType<typeof setInterval>} */
 let factoryLoopTimerId = null;
+/** Last simulation tick timestamp (performance.now), for slide duration smoothing. */
+let factoryLastSimTickAt = 0;
 
 function setAuthStatus(msg) {
     if (authStatusEl) authStatusEl.textContent = String(msg || '');
@@ -2299,9 +2301,12 @@ function factoryCombinerCanAcceptFrom(combinerKey, fromKey) {
  * Extractors → adjacent transporters; belts → storage, empty transporters, or combiners (intake/merge);
  * combiners eject along output dir onto empty transporters.
  */
-function factoryRunSimTick() {
-    const slideDur = factoryLoopIntervalMs();
-    const slideT = performance.now();
+function factoryRunSimTick(nowTick) {
+    const slideT = Number.isFinite(nowTick) ? Number(nowTick) : performance.now();
+    const targetMs = factoryLoopIntervalMs();
+    const elapsedMs = factoryLastSimTickAt > 0 ? slideT - factoryLastSimTickAt : targetMs;
+    factoryLastSimTickAt = slideT;
+    const slideDur = Math.max(16, Math.round(Math.min(targetMs * 2.25, Math.max(targetMs * 0.8, elapsedMs))));
     for (const k of Object.keys(state.factory.itemSlides)) {
         if (!state.factory.cellItems[k]) delete state.factory.itemSlides[k];
     }
@@ -2336,18 +2341,21 @@ function stopFactoryLoop() {
         clearInterval(factoryLoopTimerId);
         factoryLoopTimerId = null;
     }
+    factoryLastSimTickAt = 0;
 }
 
 function onFactoryLoopTick() {
+    const now = performance.now();
     state.factory.loopTick = (state.factory.loopTick | 0) + 1;
-    factoryRunSimTick();
-    state.factory.loopPulseUntil = performance.now() + 120;
+    factoryRunSimTick(now);
+    state.factory.loopPulseUntil = now + 120;
 }
 
 function startFactoryLoop() {
     stopFactoryLoop();
     if (state.activeWorkspace !== 'factory' || !factoryCanvasEl) return;
     const ms = factoryLoopIntervalMs();
+    factoryLastSimTickAt = performance.now();
     factoryLoopTimerId = setInterval(onFactoryLoopTick, ms);
 }
 
@@ -3358,7 +3366,7 @@ function factoryCellCenterCss(col, row, L) {
 }
 
 function factoryEaseInOutQuad(t) {
-    return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+    return t;
 }
 
 /**
