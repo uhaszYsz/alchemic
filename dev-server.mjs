@@ -267,6 +267,11 @@ function factorySorterDir(state, key) {
     return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
 }
 
+function factoryBridgeDir(state, key) {
+    const d = state.bridgeDirs[key];
+    return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
+}
+
 function factoryCombinerDir(state, key) {
     const d = state.combinerDirs[key];
     return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
@@ -280,6 +285,7 @@ function defaultFactoryState() {
         transporterDirs: {},
         sorterDirs: {},
         sorterItemFilters: {},
+        bridgeDirs: {},
         sizeUpgradeLevel: 0,
         loopMs: FACTORY_LOOP_MS_DEFAULT,
         loopTick: 0,
@@ -316,6 +322,7 @@ function sanitizeFactoryState(raw) {
     st.transporterDirs = typeof raw.transporterDirs === 'object' && raw.transporterDirs ? raw.transporterDirs : {};
     st.sorterDirs = typeof raw.sorterDirs === 'object' && raw.sorterDirs ? raw.sorterDirs : {};
     st.sorterItemFilters = typeof raw.sorterItemFilters === 'object' && raw.sorterItemFilters ? raw.sorterItemFilters : {};
+    st.bridgeDirs = typeof raw.bridgeDirs === 'object' && raw.bridgeDirs ? raw.bridgeDirs : {};
     st.combinerDirs = typeof raw.combinerDirs === 'object' && raw.combinerDirs ? raw.combinerDirs : {};
     st.cellItems = typeof raw.cellItems === 'object' && raw.cellItems ? raw.cellItems : {};
     st.combinerDiscovery =
@@ -432,6 +439,7 @@ function factoryStep(state, userId = 0) {
         getResourceId: (col, row) => factoryCellResourceId(state, col, row),
         getTransporterDir: (key) => factoryTransporterDir(state, key),
         getSorterDir: (key) => factorySorterDir(state, key),
+        getBridgeDir: (key) => factoryBridgeDir(state, key),
         getCombinerDir: (key) => factoryCombinerDir(state, key),
         resolveRecipeId: (a, b) => recipeIndex[[a, b].sort().join('+')] || null
     });
@@ -598,6 +606,7 @@ function factoryClientSnapshot(state) {
         transporterDirs: state.transporterDirs || {},
         sorterDirs: state.sorterDirs || {},
         sorterItemFilters: state.sorterItemFilters || {},
+        bridgeDirs: state.bridgeDirs || {},
         sizeUpgradeLevel: Number(state.sizeUpgradeLevel || 0) | 0,
         loopMs: factoryLoopIntervalMs(state),
         loopTick: Number(state.loopTick || 0) | 0,

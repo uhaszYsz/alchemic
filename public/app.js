@@ -37,9 +37,9 @@ const state = {
         statsPerMinute: []
     },
     factory: {
-        /** @type {Record<string, 'transporter' | 'extractor' | 'combiner' | 'storage' | 'sorter'>} key "col,row" */
+        /** @type {Record<string, 'transporter' | 'extractor' | 'combiner' | 'storage' | 'sorter' | 'bridge'>} key "col,row" */
         placements: {},
-        /** @type {null | 'transporter' | 'extractor' | 'combiner' | 'storage' | 'sorter'} */
+        /** @type {null | 'transporter' | 'extractor' | 'combiner' | 'storage' | 'sorter' | 'bridge'} */
         selectedBuilding: null,
         /**
          * Optional resource deposits on inner cells (item id, e.g. wood, water).
@@ -53,6 +53,8 @@ const state = {
         sorterDirs: {},
         /** Sorter key -> locked item id after first successful pull */
         sorterItemFilters: {},
+        /** Bridge output direction: 0 up, 1 right, 2 down, 3 left */
+        bridgeDirs: {},
         /** 0 = BASE×BASE; each +1 adds a border row/col on all four sides (placements shift inward) */
         sizeUpgradeLevel: 0,
         /** Factory simulation loop interval (ms); Speed +1 → round(current × 0.9) */
@@ -2106,6 +2108,7 @@ function normalizeFactoryFromServer(factory) {
     state.factory.sorterDirs = factory.sorterDirs && typeof factory.sorterDirs === 'object' ? factory.sorterDirs : {};
     state.factory.sorterItemFilters =
         factory.sorterItemFilters && typeof factory.sorterItemFilters === 'object' ? factory.sorterItemFilters : {};
+    state.factory.bridgeDirs = factory.bridgeDirs && typeof factory.bridgeDirs === 'object' ? factory.bridgeDirs : {};
     state.factory.combinerDirs =
         factory.combinerDirs && typeof factory.combinerDirs === 'object' ? factory.combinerDirs : {};
     state.factory.combinerDiscovery =
@@ -2135,6 +2138,7 @@ function buildFactoryPayload() {
         transporterDirs: state.factory.transporterDirs,
         sorterDirs: state.factory.sorterDirs,
         sorterItemFilters: state.factory.sorterItemFilters,
+        bridgeDirs: state.factory.bridgeDirs,
         sizeUpgradeLevel: state.factory.sizeUpgradeLevel,
         loopMs: state.factory.loopMs,
         loopTick: state.factory.loopTick,
@@ -2324,6 +2328,7 @@ function factoryRunSimTick(nowTick) {
         getResourceId: (col, row) => factoryCellResourceId(col, row),
         getTransporterDir: (key) => factoryTransporterDir(key),
         getSorterDir: (key) => factorySorterDir(key),
+        getBridgeDir: (key) => factoryBridgeDir(key),
         getCombinerDir: (key) => factoryCombinerDir(key),
         resolveRecipeId: (a, b) => {
             const comboKey = [a, b].sort().join('+');
@@ -2334,7 +2339,13 @@ function factoryRunSimTick(nowTick) {
     if (isInventoryPanelOpen()) {
         addItemsToPlayerInventory(out && out.invDelta && typeof out.invDelta === 'object' ? out.invDelta : {});
     }
-    const moveLike = [...(out.spawns || []), ...(out.sorterPulls || []), ...(out.movesTT || []), ...(out.movesToEmptyCombiner || [])];
+    const moveLike = [
+        ...(out.spawns || []),
+        ...(out.sorterPulls || []),
+        ...(out.bridgeMoves || []),
+        ...(out.movesTT || []),
+        ...(out.movesToEmptyCombiner || [])
+    ];
     for (const mv of moveLike) {
         if (!mv || !mv.from || !mv.to) continue;
         factoryRecordItemSlide(mv.to, mv.from, slideDur, slideT);
@@ -3225,6 +3236,7 @@ function factoryShiftKeyedMaps(dc, dr) {
     state.factory.sorterItemFilters = /** @type {typeof state.factory.sorterItemFilters} */ (
         shift(state.factory.sorterItemFilters)
     );
+    state.factory.bridgeDirs = /** @type {typeof state.factory.bridgeDirs} */ (shift(state.factory.bridgeDirs));
     state.factory.combinerDirs = /** @type {typeof state.factory.combinerDirs} */ (shift(state.factory.combinerDirs));
     state.factory.combinerDiscovery = /** @type {typeof state.factory.combinerDiscovery} */ (shift(state.factory.combinerDiscovery));
     {
@@ -3329,6 +3341,11 @@ function factoryTransporterDir(key) {
 
 function factorySorterDir(key) {
     const d = state.factory.sorterDirs[key];
+    return typeof d === 'number' && d >= 0 && d <= 3 ? d : 0;
+}
+
+function factoryBridgeDir(key) {
+    const d = state.factory.bridgeDirs[key];
     return typeof d === 'number' && d >= 0 && d <= 3 ? d : 0;
 }
 
@@ -3904,6 +3921,28 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.shadowBlur = 2 * sc;
         ctx.fillText(label, w - Math.max(2, 2 * sc), Math.max(1, 1 * sc));
         ctx.restore();
+    } else if (placement === 'bridge') {
+        const bDir = factoryBridgeDir(key);
+        const angle = (bDir * Math.PI) / 2;
+        const bodyW = w * 0.62;
+        const bodyH = h * 0.34;
+        ctx.save();
+        ctx.translate(midX, midY);
+        ctx.rotate(angle);
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = Math.max(1, sc);
+        ctx.fillRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+        ctx.strokeRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+        ctx.fillStyle = '#22d3ee';
+        ctx.fillRect(-bodyW * 0.4, -bodyH * 0.1, bodyW * 0.8, bodyH * 0.2);
+        ctx.beginPath();
+        ctx.moveTo(0, -bodyH * 0.95);
+        ctx.lineTo(4.6 * sc, -bodyH * 0.35);
+        ctx.lineTo(-4.6 * sc, -bodyH * 0.35);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
     } else if (placement === 'sorter') {
         const sDir = factorySorterDir(key);
         const angle = (sDir * Math.PI) / 2;
@@ -4255,6 +4294,7 @@ function factoryHandleCellAction(col, row, shiftKey) {
         delete state.factory.transporterDirs[key];
         delete state.factory.sorterDirs[key];
         delete state.factory.sorterItemFilters[key];
+        delete state.factory.bridgeDirs[key];
         delete state.factory.combinerDirs[key];
         delete state.factory.combinerDiscovery[key];
         delete state.factory.cellItems[key];
@@ -4283,6 +4323,12 @@ function factoryHandleCellAction(col, row, shiftKey) {
         return;
     }
 
+    if (placement === 'bridge' && (!sel || sel === 'bridge')) {
+        state.factory.bridgeDirs[key] = (factoryBridgeDir(key) + 1) % 4;
+        notifyFactoryStateMutated();
+        return;
+    }
+
     if (placement === 'combiner' && (!sel || sel === 'combiner')) {
         state.factory.combinerDirs[key] = (factoryCombinerDir(key) + 1) % 4;
         notifyFactoryStateMutated();
@@ -4300,6 +4346,7 @@ function factoryHandleCellAction(col, row, shiftKey) {
         delete state.factory.transporterDirs[key];
         delete state.factory.sorterDirs[key];
         delete state.factory.sorterItemFilters[key];
+        delete state.factory.bridgeDirs[key];
         delete state.factory.combinerDirs[key];
     } else if (sel === 'transporter') {
         if (state.factory.transporterDirs[key] === undefined) {
@@ -4307,17 +4354,28 @@ function factoryHandleCellAction(col, row, shiftKey) {
         }
         delete state.factory.sorterDirs[key];
         delete state.factory.sorterItemFilters[key];
+        delete state.factory.bridgeDirs[key];
         delete state.factory.combinerDirs[key];
     } else if (sel === 'sorter') {
         delete state.factory.transporterDirs[key];
+        delete state.factory.bridgeDirs[key];
         delete state.factory.combinerDirs[key];
         if (state.factory.sorterDirs[key] === undefined) {
             state.factory.sorterDirs[key] = 0;
+        }
+    } else if (sel === 'bridge') {
+        delete state.factory.transporterDirs[key];
+        delete state.factory.sorterDirs[key];
+        delete state.factory.sorterItemFilters[key];
+        delete state.factory.combinerDirs[key];
+        if (state.factory.bridgeDirs[key] === undefined) {
+            state.factory.bridgeDirs[key] = 0;
         }
     } else if (sel === 'combiner') {
         delete state.factory.transporterDirs[key];
         delete state.factory.sorterDirs[key];
         delete state.factory.sorterItemFilters[key];
+        delete state.factory.bridgeDirs[key];
         if (state.factory.combinerDirs[key] === undefined) {
             state.factory.combinerDirs[key] = 0;
         }
@@ -4325,6 +4383,7 @@ function factoryHandleCellAction(col, row, shiftKey) {
         delete state.factory.transporterDirs[key];
         delete state.factory.sorterDirs[key];
         delete state.factory.sorterItemFilters[key];
+        delete state.factory.bridgeDirs[key];
         delete state.factory.combinerDirs[key];
     }
     notifyFactoryStateMutated();
@@ -4903,6 +4962,7 @@ if (factoryClearBtn) {
         state.factory.transporterDirs = {};
         state.factory.sorterDirs = {};
         state.factory.sorterItemFilters = {};
+        state.factory.bridgeDirs = {};
         state.factory.cellItems = {};
         state.factory.combinerDirs = {};
         state.factory.combinerDiscovery = {};
@@ -5543,7 +5603,7 @@ if (factoryCanvasEl) {
 document.querySelectorAll('.factory-build-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
         const t = btn.getAttribute('data-factory-building');
-        if (!t || (t !== 'transporter' && t !== 'extractor' && t !== 'combiner' && t !== 'storage' && t !== 'sorter')) return;
+        if (!t || (t !== 'transporter' && t !== 'extractor' && t !== 'combiner' && t !== 'storage' && t !== 'sorter' && t !== 'bridge')) return;
         factoryClearBeltLineState();
         state.factory.selectedBuilding = state.factory.selectedBuilding === t ? null : t;
         updateFactoryBuildButtons();
@@ -5556,6 +5616,7 @@ if (factoryClearBuildingsBtn) {
         state.factory.transporterDirs = {};
         state.factory.sorterDirs = {};
         state.factory.sorterItemFilters = {};
+        state.factory.bridgeDirs = {};
         state.factory.combinerDirs = {};
         state.factory.combinerDiscovery = {};
         state.factory.factoryDiscoveryCombinerKey = null;

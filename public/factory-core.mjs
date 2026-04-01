@@ -46,6 +46,7 @@ export function simulateFactoryStep(state, deps) {
     const getResourceId = deps.getResourceId;
     const getTransporterDir = deps.getTransporterDir;
     const getSorterDir = deps.getSorterDir;
+    const getBridgeDir = deps.getBridgeDir;
     const getCombinerDir = deps.getCombinerDir;
     const resolveRecipeId = deps.resolveRecipeId;
     const loopTick = Number(state.loopTick || 0) | 0;
@@ -78,7 +79,7 @@ export function simulateFactoryStep(state, deps) {
                 const nb = factoryNeighborColRow(cell.col, cell.row, dir);
                 if (!inBounds(nb.col, nb.row)) continue;
                 const tk = factoryPlacementKey(nb.col, nb.row);
-                if (state.placements[tk] !== 'transporter') continue;
+                if (state.placements[tk] !== 'transporter' && state.placements[tk] !== 'bridge') continue;
                 if (work[tk]) continue;
                 work[tk] = resId;
                 spawnedThisTick.add(tk);
@@ -89,6 +90,7 @@ export function simulateFactoryStep(state, deps) {
 
     const deposits = [];
     const sorterPulls = [];
+    const bridgeMoves = [];
     const movesTTCandidates = [];
     const movesToEmptyCombinerCandidates = [];
     const movesTT = [];
@@ -100,9 +102,12 @@ export function simulateFactoryStep(state, deps) {
         if (work[sorterKey]) continue;
         const sc = factoryKeyToColRow(sorterKey);
         if (!Number.isFinite(sc.col) || !Number.isFinite(sc.row)) continue;
+        const sorterOutDir = getSorterDir(sorterKey);
         const filterId = typeof sorterItemFilters[sorterKey] === 'string' ? sorterItemFilters[sorterKey] : '';
         const picks = [];
         for (let dir = 0; dir < 4; dir++) {
+            // Do not pull from the output side, prevents sorter self-feedback loops.
+            if (dir === sorterOutDir) continue;
             const nb = factoryNeighborColRow(sc.col, sc.row, dir);
             if (!inBounds(nb.col, nb.row)) continue;
             const fromKey = factoryPlacementKey(nb.col, nb.row);
@@ -127,6 +132,35 @@ export function simulateFactoryStep(state, deps) {
         work[sorterKey] = chosen.itemId;
         if (!filterId) sorterItemFilters[sorterKey] = chosen.itemId;
         sorterPulls.push({ from: chosen.from, to: sorterKey, itemId: chosen.itemId });
+    }
+
+    // Bridge: like transporter, but teleports to cell two steps ahead.
+    // Deliberately does not use shared conflict arbitration (claimed sets / round-robin).
+    const bridgeKeys = Object.entries(state.placements || {})
+        .filter(([, p]) => p === 'bridge')
+        .map(([k]) => k)
+        .sort();
+    for (const key of bridgeKeys) {
+        if (spawnedThisTick.has(key)) continue;
+        const itemId = work[key];
+        if (!itemId) continue;
+        const cell = factoryKeyToColRow(key);
+        const dir = getBridgeDir(key);
+        const n1 = factoryNeighborColRow(cell.col, cell.row, dir);
+        const n2 = factoryNeighborColRow(n1.col, n1.row, dir);
+        if (!inBounds(n2.col, n2.row)) continue;
+        const destKey = factoryPlacementKey(n2.col, n2.row);
+        const destPl = state.placements[destKey];
+        if (destPl === 'storage') {
+            deposits.push({ from: key, to: destKey, itemId });
+            bridgeMoves.push({ from: key, to: destKey, itemId });
+            continue;
+        }
+        if (destPl !== 'transporter' && destPl !== 'sorter' && destPl !== 'bridge') continue;
+        if (work[destKey]) continue;
+        delete work[key];
+        work[destKey] = itemId;
+        bridgeMoves.push({ from: key, to: destKey, itemId });
     }
 
     for (const [key, p] of Object.entries(state.placements || {})) {
@@ -274,5 +308,5 @@ export function simulateFactoryStep(state, deps) {
         next[k] = v;
     }
     state.cellItems = next;
-    return { invDelta, deposits, combined, spawns, sorterPulls, movesTT, movesToEmptyCombiner };
+    return { invDelta, deposits, combined, spawns, sorterPulls, bridgeMoves, movesTT, movesToEmptyCombiner };
 }
