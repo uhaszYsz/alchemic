@@ -30,7 +30,9 @@ const state = {
     factoryRuntime: {
         running: false,
         remainingMs: 0,
-        runStoppedAt: null
+        runStoppedAt: null,
+        runUntilAtMs: 0,
+        statsPerMinute: []
     },
     factory: {
         /** @type {Record<string, 'transporter' | 'extractor' | 'combiner' | 'storage'>} key "col,row" */
@@ -84,6 +86,7 @@ const state = {
         username: '',
         playerPingTimerId: null,
         factoryRuntimeTimerId: null,
+        factoryRuntimeUiTimerId: null,
         enteringFactory: false
     },
     /** comboKey -> true; user cancelled naming earlier */
@@ -1627,6 +1630,9 @@ const authRegisterBtn = document.getElementById('auth-register-btn');
 const authLogoutBtn = document.getElementById('auth-logout-btn');
 const authUserPillEl = document.getElementById('auth-user-pill');
 const factoryRuntimeStatusEl = document.getElementById('factory-runtime-status');
+const factoryRuntimeStatsModalEl = document.getElementById('factory-runtime-stats-modal');
+const closeFactoryRuntimeStatsBtn = document.getElementById('close-factory-runtime-stats');
+const factoryRuntimeStatsListEl = document.getElementById('factory-runtime-stats-list');
 const openGlobalDiscoveriesBtn = document.getElementById('open-global-discoveries');
 const openDbViewerBtn = document.getElementById('open-db-viewer');
 const openProfileBtn = document.getElementById('open-profile');
@@ -1737,10 +1743,24 @@ function formatMmSs(ms) {
 /** @param {any} runtime */
 function applyFactoryRuntime(runtime) {
     const r = runtime && typeof runtime === 'object' ? runtime : {};
+    const runUntilAtMs = Date.parse(String(r.runUntilAt || ''));
+    const statsPerMinuteRaw = Array.isArray(r.statsPerMinute) ? r.statsPerMinute : [];
+    const statsPerMinute = statsPerMinuteRaw
+        .map((row) => {
+            const minute = Math.max(1, Number(row && row.minute) | 0);
+            const itemsRaw = Array.isArray(row && row.items) ? row.items : [];
+            const items = itemsRaw
+                .map((it) => ({ itemId: String(it && it.itemId ? it.itemId : '').trim(), qty: Number(it && it.qty ? it.qty : 0) | 0 }))
+                .filter((it) => it.itemId && it.qty > 0);
+            return { minute, items };
+        })
+        .filter((row) => row.items.length > 0);
     state.factoryRuntime = {
         running: r.running === true,
         remainingMs: Math.max(0, Number(r.remainingMs || 0)),
-        runStoppedAt: typeof r.runStoppedAt === 'string' && r.runStoppedAt.trim() ? r.runStoppedAt : null
+        runStoppedAt: typeof r.runStoppedAt === 'string' && r.runStoppedAt.trim() ? r.runStoppedAt : null,
+        runUntilAtMs: Number.isFinite(runUntilAtMs) ? runUntilAtMs : 0,
+        statsPerMinute
     };
     renderFactoryRuntimeStatus();
 }
@@ -1752,15 +1772,58 @@ function renderFactoryRuntimeStatus() {
         return;
     }
     const rt = state.factoryRuntime || {};
+    if (rt.running && Number(rt.runUntilAtMs || 0) > 0) {
+        const rem = Math.max(0, Number(rt.runUntilAtMs) - Date.now());
+        rt.remainingMs = rem;
+        if (rem <= 0) {
+            rt.running = false;
+            rt.runStoppedAt = new Date().toISOString();
+            rt.runUntilAtMs = 0;
+        }
+    }
     if (rt.running) {
         factoryRuntimeStatusEl.textContent = `Factory run: ${formatMmSs(rt.remainingMs)} left`;
+        factoryRuntimeStatusEl.classList.remove('cursor-pointer');
         return;
     }
     if (rt.runStoppedAt) {
         factoryRuntimeStatusEl.textContent = 'Factory run stopped';
+        factoryRuntimeStatusEl.classList.add('cursor-pointer');
         return;
     }
+    factoryRuntimeStatusEl.classList.remove('cursor-pointer');
     factoryRuntimeStatusEl.textContent = 'Factory idle';
+}
+
+function setFactoryRuntimeStatsModalOpen(open) {
+    if (!factoryRuntimeStatsModalEl) return;
+    factoryRuntimeStatsModalEl.classList.toggle('hidden', !open);
+}
+
+function renderFactoryRuntimeStatsModal() {
+    if (!factoryRuntimeStatsListEl) return;
+    const rows = Array.isArray(state.factoryRuntime.statsPerMinute) ? state.factoryRuntime.statsPerMinute : [];
+    factoryRuntimeStatsListEl.innerHTML = '';
+    if (!rows.length) {
+        const p = document.createElement('p');
+        p.className = 'text-xs text-slate-400';
+        p.textContent = 'No production data for last stopped run.';
+        factoryRuntimeStatsListEl.appendChild(p);
+        return;
+    }
+    for (const row of rows) {
+        const line = document.createElement('div');
+        line.className = 'text-xs text-slate-200 border border-slate-700 rounded-lg p-2 bg-slate-900/50';
+        const itemsText = row.items
+            .map((it) => {
+                const lib = state.library.find((e) => e.id === it.itemId);
+                const label = lib ? `${emojiForItemId(it.itemId)} ${splitLabel(lib.name).text}` : it.itemId;
+                return `${label} x${it.qty}`;
+            })
+            .join(', ');
+        line.textContent = `Minute ${row.minute}: ${itemsText}`;
+        factoryRuntimeStatsListEl.appendChild(line);
+    }
 }
 
 async function pullFactoryRuntimeStatus() {
@@ -1786,12 +1849,21 @@ function startFactoryRuntimeSyncLoop() {
     if (state.activeWorkspace === 'factory') {
         void pullFactoryRuntimeStatus();
     }
+    if (state.auth.factoryRuntimeUiTimerId == null) {
+        state.auth.factoryRuntimeUiTimerId = setInterval(() => {
+            renderFactoryRuntimeStatus();
+        }, 1000);
+    }
 }
 
 function stopFactoryRuntimeSyncLoop() {
     if (state.auth.factoryRuntimeTimerId == null) return;
     clearInterval(state.auth.factoryRuntimeTimerId);
     state.auth.factoryRuntimeTimerId = null;
+    if (state.auth.factoryRuntimeUiTimerId != null) {
+        clearInterval(state.auth.factoryRuntimeUiTimerId);
+        state.auth.factoryRuntimeUiTimerId = null;
+    }
 }
 
 async function postPlayerPing() {
@@ -4637,6 +4709,25 @@ if (toggleInventoryBtn && inventoryPanelEl) {
     });
 }
 
+if (factoryRuntimeStatusEl) {
+    factoryRuntimeStatusEl.addEventListener('click', async () => {
+        const rt = state.factoryRuntime || {};
+        if (!rt.runStoppedAt) return;
+        await pullFactoryRuntimeStatus();
+        renderFactoryRuntimeStatsModal();
+        setFactoryRuntimeStatsModalOpen(true);
+    });
+}
+
+if (closeFactoryRuntimeStatsBtn) {
+    closeFactoryRuntimeStatsBtn.addEventListener('click', () => setFactoryRuntimeStatsModalOpen(false));
+}
+if (factoryRuntimeStatsModalEl) {
+    factoryRuntimeStatsModalEl.addEventListener('click', (e) => {
+        if (e.target === factoryRuntimeStatsModalEl) setFactoryRuntimeStatsModalOpen(false);
+    });
+}
+
 if (openGlobalDiscoveriesBtn) {
     openGlobalDiscoveriesBtn.addEventListener('click', async () => {
         openGlobalDiscoveriesBtn.disabled = true;
@@ -5071,6 +5162,10 @@ window.addEventListener('keydown', (e) => {
     }
     if (globalDiscoveriesModalEl && !globalDiscoveriesModalEl.classList.contains('hidden')) {
         setGlobalDiscoveriesModalOpen(false);
+        return;
+    }
+    if (factoryRuntimeStatsModalEl && !factoryRuntimeStatsModalEl.classList.contains('hidden')) {
+        setFactoryRuntimeStatsModalOpen(false);
         return;
     }
     if (upgradesModalEl && !upgradesModalEl.classList.contains('hidden')) {

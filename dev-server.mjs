@@ -255,7 +255,9 @@ function defaultFactoryState() {
         _factoryRunUntilAt: 0,
         _factoryRunStartedAt: 0,
         _factoryRunStoppedAtIso: null,
-        _factoryPendingProduced: {}
+        _factoryPendingProduced: {},
+        _factoryCurrentProducedPerMinute: {},
+        _factoryLastProducedPerMinute: {}
     };
 }
 
@@ -289,6 +291,14 @@ function sanitizeFactoryState(raw) {
             : null;
     st._factoryPendingProduced =
         typeof raw._factoryPendingProduced === 'object' && raw._factoryPendingProduced ? raw._factoryPendingProduced : {};
+    st._factoryCurrentProducedPerMinute =
+        typeof raw._factoryCurrentProducedPerMinute === 'object' && raw._factoryCurrentProducedPerMinute
+            ? raw._factoryCurrentProducedPerMinute
+            : {};
+    st._factoryLastProducedPerMinute =
+        typeof raw._factoryLastProducedPerMinute === 'object' && raw._factoryLastProducedPerMinute
+            ? raw._factoryLastProducedPerMinute
+            : {};
     return st;
 }
 
@@ -300,6 +310,50 @@ function activateFactoryRunWindow(state, now = Date.now()) {
     if (!state._factoryPendingProduced || typeof state._factoryPendingProduced !== 'object') {
         state._factoryPendingProduced = {};
     }
+    state._factoryCurrentProducedPerMinute = {};
+}
+
+function addProducedToMinuteStats(state, nowMs, delta) {
+    if (!delta || typeof delta !== 'object') return;
+    const startedAt = Number(state._factoryRunStartedAt || 0);
+    if (!startedAt) return;
+    const minuteIdx = Math.max(0, Math.floor((nowMs - startedAt) / 60000));
+    const minuteKey = String(minuteIdx);
+    if (!state._factoryCurrentProducedPerMinute || typeof state._factoryCurrentProducedPerMinute !== 'object') {
+        state._factoryCurrentProducedPerMinute = {};
+    }
+    const bucket = state._factoryCurrentProducedPerMinute[minuteKey];
+    const outBucket = bucket && typeof bucket === 'object' ? bucket : {};
+    for (const [itemId, qty] of Object.entries(delta)) {
+        const n = Number(qty) | 0;
+        if (!itemId || n <= 0) continue;
+        outBucket[itemId] = (Number(outBucket[itemId] || 0) | 0) + n;
+    }
+    state._factoryCurrentProducedPerMinute[minuteKey] = outBucket;
+}
+
+function factoryStatsPerMinuteRows(state) {
+    const src = state._factoryLastProducedPerMinute && typeof state._factoryLastProducedPerMinute === 'object'
+        ? state._factoryLastProducedPerMinute
+        : {};
+    const minuteIdxs = Object.keys(src)
+        .map((k) => Number(k))
+        .filter((n) => Number.isFinite(n) && n >= 0)
+        .sort((a, b) => a - b);
+    const rows = [];
+    for (const idx of minuteIdxs) {
+        const bucket = src[String(idx)];
+        if (!bucket || typeof bucket !== 'object') continue;
+        const items = [];
+        for (const [itemId, qtyRaw] of Object.entries(bucket)) {
+            const qty = Number(qtyRaw) | 0;
+            if (!itemId || qty <= 0) continue;
+            items.push({ itemId, qty });
+        }
+        items.sort((a, b) => a.itemId.localeCompare(b.itemId));
+        rows.push({ minute: idx + 1, items });
+    }
+    return rows;
 }
 
 function factoryRuntimeStatus(state, now = Date.now()) {
@@ -311,7 +365,8 @@ function factoryRuntimeStatus(state, now = Date.now()) {
         runStartedAt:
             Number(state._factoryRunStartedAt || 0) > 0 ? new Date(Number(state._factoryRunStartedAt)).toISOString() : null,
         runStoppedAt: state._factoryRunStoppedAtIso || null,
-        remainingMs: running ? Math.max(0, runUntil - now) : 0
+        remainingMs: running ? Math.max(0, runUntil - now) : 0,
+        statsPerMinute: factoryStatsPerMinuteRows(state)
     };
 }
 
@@ -397,6 +452,7 @@ function tickAllFactories() {
         if (now >= runUntil) {
             if (!st._factoryRunStoppedAtIso) {
                 st._factoryRunStoppedAtIso = new Date(now).toISOString();
+                st._factoryLastProducedPerMinute = st._factoryCurrentProducedPerMinute || {};
             }
             st._factoryRunUntilAt = 0;
             st._factoryRunStartedAt = 0;
@@ -425,6 +481,7 @@ function tickAllFactories() {
                 if (!itemId || n <= 0) continue;
                 st._factoryPendingProduced[itemId] = (Number(st._factoryPendingProduced[itemId] || 0) | 0) + n;
             }
+            addProducedToMinuteStats(st, now, totalDelta);
         }
     }
 }

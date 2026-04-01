@@ -468,6 +468,18 @@
         </div>
     </div>
 
+    <div id="factory-runtime-stats-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[60] backdrop-blur-sm px-3 py-3 overflow-y-auto">
+        <div class="bg-slate-800 rounded-2xl border border-slate-600 shadow-2xl w-full max-w-xl max-h-[92vh] overflow-hidden flex flex-col">
+            <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">
+                <h2 class="text-sm font-bold text-slate-200">Factory Run Stats</h2>
+                <button type="button" id="close-factory-runtime-stats" class="min-h-[44px] px-3 py-2 rounded-xl bg-slate-800 border border-slate-600 text-slate-200 text-sm font-semibold hover:bg-slate-700 transition touch-manipulation">
+                    Close
+                </button>
+            </div>
+            <div id="factory-runtime-stats-list" class="p-3 space-y-2 overflow-y-auto"></div>
+        </div>
+    </div>
+
     <div id="global-discoveries-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm px-3 py-3 overflow-y-auto">
         <div class="bg-slate-800 rounded-2xl border border-slate-600 shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-hidden flex flex-col">
             <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">
