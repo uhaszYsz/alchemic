@@ -91,6 +91,12 @@ let globalDiscoveriesRows = [];
 let globalDiscoveriesPage = 1;
 let globalDiscoveriesSort = 'datetime';
 let globalDiscoveriesExpandedId = '';
+let dbViewerTables = [];
+let dbViewerSelectedTable = '';
+let dbViewerPrimaryKey = [];
+let dbViewerHasRowid = false;
+let dbViewerColumns = [];
+let dbViewerRows = [];
 /** @type {Record<string, { id: number, itemId: string, proposalType: 'name'|'image', proposedName?: string, proposedImagePath?: string, createdBy: number, createdAt: string, upvotes: number, downvotes: number, myVote: number }[]>} */
 let discoveryProposalsByItem = {};
 let discoveryProposalTargetItemId = '';
@@ -1005,6 +1011,58 @@ async function postDiscoveryDelete(id) {
     if (!r.ok) throw new Error(t || `${r.status}`);
 }
 
+/** @returns {Promise<string[]>} */
+async function fetchDbTables() {
+    const r = await apiFetch('/api/db/tables', { method: 'GET' });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return Array.isArray(out && out.tables) ? out.tables.map((x) => String(x || '')).filter(Boolean) : [];
+}
+
+/**
+ * @param {string} table
+ * @returns {Promise<{ table: string, columns: string[], primaryKey: string[], rows: Record<string, any>[], hasRowid: boolean, total: number, limit: number, offset: number }>}
+ */
+async function fetchDbTableRows(table) {
+    const r = await apiFetch('/api/db/table', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ table, limit: 200, offset: 0 })
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return {
+        table: String(out && out.table ? out.table : ''),
+        columns: Array.isArray(out && out.columns) ? out.columns.map((x) => String(x || '')) : [],
+        primaryKey: Array.isArray(out && out.primaryKey) ? out.primaryKey.map((x) => String(x || '')) : [],
+        rows: Array.isArray(out && out.rows) ? out.rows : [],
+        hasRowid: out && out.hasRowid === true,
+        total: Number(out && out.total ? out.total : 0) | 0,
+        limit: Number(out && out.limit ? out.limit : 0) | 0,
+        offset: Number(out && out.offset ? out.offset : 0) | 0
+    };
+}
+
+/**
+ * @param {string} table
+ * @param {{ rowid?: number, pk?: Record<string, any> }} identity
+ * @returns {Promise<void>}
+ */
+async function postDbDeleteRow(table, identity) {
+    const payload = { table };
+    if (identity && typeof identity.rowid === 'number') payload.rowid = identity.rowid;
+    if (identity && identity.pk && typeof identity.pk === 'object') payload.pk = identity.pk;
+    const r = await apiFetch('/api/db/delete-row', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(payload)
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+}
+
 /**
  * @param {string} itemId
  * @returns {Promise<{ id: number, itemId: string, proposalType: 'name'|'image', proposedName?: string, proposedImagePath?: string, createdBy: number, createdAt: string, upvotes: number, downvotes: number, myVote: number }[]>}
@@ -1282,6 +1340,133 @@ function setGlobalDiscoveriesModalOpen(open) {
     globalDiscoveriesModalEl.classList.toggle('hidden', !open);
 }
 
+function setDbViewerModalOpen(open) {
+    if (!dbViewerModalEl) return;
+    dbViewerModalEl.classList.toggle('hidden', !open);
+}
+
+function setDbViewerStatus(msg) {
+    if (dbViewerStatusEl) dbViewerStatusEl.textContent = String(msg || '');
+}
+
+function renderDbViewerTableSelect() {
+    if (!dbViewerTableSelectEl) return;
+    dbViewerTableSelectEl.innerHTML = '';
+    dbViewerTables.forEach((name) => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        dbViewerTableSelectEl.appendChild(opt);
+    });
+    if (dbViewerSelectedTable) dbViewerTableSelectEl.value = dbViewerSelectedTable;
+}
+
+async function refreshDbViewerRows() {
+    if (!dbViewerSelectedTable) return;
+    setDbViewerStatus(`Loading ${dbViewerSelectedTable}...`);
+    const out = await fetchDbTableRows(dbViewerSelectedTable);
+    dbViewerColumns = out.columns;
+    dbViewerRows = out.rows;
+    dbViewerPrimaryKey = out.primaryKey;
+    dbViewerHasRowid = out.hasRowid;
+    if (dbViewerMetaEl) {
+        const pkLabel = dbViewerPrimaryKey.length ? `PK: ${dbViewerPrimaryKey.join(', ')}` : 'PK: none';
+        dbViewerMetaEl.textContent = `${out.total} row(s). ${pkLabel}${dbViewerHasRowid ? ' | rowid available' : ''}`;
+    }
+    renderDbViewerRows();
+    setDbViewerStatus('');
+}
+
+function renderDbViewerRows() {
+    if (!dbViewerHeadEl || !dbViewerBodyEl) return;
+    dbViewerHeadEl.innerHTML = '';
+    dbViewerBodyEl.innerHTML = '';
+    const cols = [];
+    if (dbViewerHasRowid) cols.push('__rowid');
+    cols.push(...dbViewerColumns);
+    const trHead = document.createElement('tr');
+    trHead.className = 'border-b border-slate-700/80';
+    const thActions = document.createElement('th');
+    thActions.className = 'text-left px-2 py-2 text-slate-300 font-semibold';
+    thActions.textContent = 'Actions';
+    trHead.appendChild(thActions);
+    for (const c of cols) {
+        const th = document.createElement('th');
+        th.className = 'text-left px-2 py-2 text-slate-300 font-semibold whitespace-nowrap';
+        th.textContent = c;
+        trHead.appendChild(th);
+    }
+    dbViewerHeadEl.appendChild(trHead);
+    dbViewerRows.forEach((row) => {
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-slate-900/40 align-top';
+        const tdAction = document.createElement('td');
+        tdAction.className = 'px-2 py-1.5';
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'px-2 py-1 rounded bg-red-800/90 border border-red-600 text-red-100 text-[11px] font-semibold';
+        del.textContent = 'Delete';
+        del.addEventListener('click', async () => {
+            const identity = {};
+            if (dbViewerPrimaryKey.length) {
+                const pk = {};
+                for (const k of dbViewerPrimaryKey) pk[k] = row[k];
+                identity.pk = pk;
+            } else if (dbViewerHasRowid) {
+                identity.rowid = Number(row.__rowid);
+            }
+            const keyPreview = dbViewerPrimaryKey.length
+                ? dbViewerPrimaryKey.map((k) => `${k}=${String(row[k])}`).join(', ')
+                : `rowid=${String(row.__rowid)}`;
+            if (!confirm(`Delete row from ${dbViewerSelectedTable}?\\n${keyPreview}`)) return;
+            del.disabled = true;
+            try {
+                await postDbDeleteRow(dbViewerSelectedTable, identity);
+                await refreshDbViewerRows();
+                try {
+                    await reloadCatalogFromApi();
+                    await refreshGlobalDiscoveriesFromApi();
+                } catch {
+                    /* best effort */
+                }
+            } catch (e) {
+                setDbViewerStatus(String(e && e.message ? e.message : e).slice(0, 240));
+                del.disabled = false;
+            }
+        });
+        tdAction.appendChild(del);
+        tr.appendChild(tdAction);
+        for (const c of cols) {
+            const td = document.createElement('td');
+            td.className = 'px-2 py-1.5 text-slate-200 whitespace-nowrap';
+            const v = row[c];
+            td.textContent = v == null ? 'NULL' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+            tr.appendChild(td);
+        }
+        dbViewerBodyEl.appendChild(tr);
+    });
+}
+
+async function openDbViewerModal() {
+    setDbViewerModalOpen(true);
+    setDbViewerStatus('Loading tables...');
+    dbViewerTables = await fetchDbTables();
+    if (!dbViewerTables.length) {
+        dbViewerSelectedTable = '';
+        renderDbViewerTableSelect();
+        if (dbViewerMetaEl) dbViewerMetaEl.textContent = 'No tables';
+        if (dbViewerHeadEl) dbViewerHeadEl.innerHTML = '';
+        if (dbViewerBodyEl) dbViewerBodyEl.innerHTML = '';
+        setDbViewerStatus('');
+        return;
+    }
+    if (!dbViewerSelectedTable || !dbViewerTables.includes(dbViewerSelectedTable)) {
+        dbViewerSelectedTable = dbViewerTables[0];
+    }
+    renderDbViewerTableSelect();
+    await refreshDbViewerRows();
+}
+
 const libraryEl = document.getElementById('library');
 const workspaceEl = document.getElementById('workspace');
 const factoryWorkspaceEl = document.getElementById('factory-workspace');
@@ -1307,6 +1492,7 @@ const authRegisterBtn = document.getElementById('auth-register-btn');
 const authLogoutBtn = document.getElementById('auth-logout-btn');
 const authUserPillEl = document.getElementById('auth-user-pill');
 const openGlobalDiscoveriesBtn = document.getElementById('open-global-discoveries');
+const openDbViewerBtn = document.getElementById('open-db-viewer');
 const floatingDiscoveryAlertWrapEl = document.getElementById('floating-discovery-alert');
 const openLatestDiscoveryBtn = document.getElementById('open-latest-discovery');
 const floatingDiscoveryAlertCountEl = document.getElementById('floating-discovery-alert-count');
@@ -1320,6 +1506,14 @@ const globalDiscoveriesListEl = document.getElementById('global-discoveries-list
 const globalDiscoveriesSortEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('global-discoveries-sort'));
 const globalDiscoveriesPrevBtn = document.getElementById('global-discoveries-prev');
 const globalDiscoveriesNextBtn = document.getElementById('global-discoveries-next');
+const dbViewerModalEl = document.getElementById('db-viewer-modal');
+const closeDbViewerBtn = document.getElementById('close-db-viewer');
+const dbViewerTableSelectEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('db-viewer-table-select'));
+const dbViewerRefreshBtn = document.getElementById('db-viewer-refresh');
+const dbViewerMetaEl = document.getElementById('db-viewer-meta');
+const dbViewerStatusEl = document.getElementById('db-viewer-status');
+const dbViewerHeadEl = document.getElementById('db-viewer-head');
+const dbViewerBodyEl = document.getElementById('db-viewer-body');
 const discoveryVoteOptionsModalEl = document.getElementById('discovery-vote-options-modal');
 const closeDiscoveryVoteOptionsBtn = document.getElementById('close-discovery-vote-options');
 const openDiscoveryNameProposalBtn = document.getElementById('open-discovery-name-proposal');
@@ -4069,6 +4263,43 @@ if (globalDiscoveriesModalEl) {
     });
 }
 
+if (openDbViewerBtn) {
+    openDbViewerBtn.addEventListener('click', async () => {
+        openDbViewerBtn.disabled = true;
+        try {
+            await openDbViewerModal();
+        } catch (e) {
+            setDbViewerStatus(String(e && e.message ? e.message : e).slice(0, 240));
+            setDbViewerModalOpen(true);
+        } finally {
+            openDbViewerBtn.disabled = false;
+        }
+    });
+}
+if (closeDbViewerBtn) {
+    closeDbViewerBtn.addEventListener('click', () => setDbViewerModalOpen(false));
+}
+if (dbViewerModalEl) {
+    dbViewerModalEl.addEventListener('click', (e) => {
+        if (e.target === dbViewerModalEl) setDbViewerModalOpen(false);
+    });
+}
+if (dbViewerTableSelectEl) {
+    dbViewerTableSelectEl.addEventListener('change', () => {
+        dbViewerSelectedTable = dbViewerTableSelectEl.value;
+        void refreshDbViewerRows().catch((e) =>
+            setDbViewerStatus(String(e && e.message ? e.message : e).slice(0, 240))
+        );
+    });
+}
+if (dbViewerRefreshBtn) {
+    dbViewerRefreshBtn.addEventListener('click', () => {
+        void refreshDbViewerRows().catch((e) =>
+            setDbViewerStatus(String(e && e.message ? e.message : e).slice(0, 240))
+        );
+    });
+}
+
 if (globalDiscoveriesListEl) {
     globalDiscoveriesListEl.addEventListener('click', async (ev) => {
         const t = ev.target;
@@ -4379,6 +4610,10 @@ if (upgradesModalEl) {
 }
 window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    if (dbViewerModalEl && !dbViewerModalEl.classList.contains('hidden')) {
+        setDbViewerModalOpen(false);
+        return;
+    }
     if (discoveryImageProposalModalEl && !discoveryImageProposalModalEl.classList.contains('hidden')) {
         setDiscoveryImageProposalModalOpen(false);
         return;

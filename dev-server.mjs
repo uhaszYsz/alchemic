@@ -714,6 +714,101 @@ function serveFile(res, filePath) {
     });
 }
 
+function isSafeSqlIdentifier(name) {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(name || ''));
+}
+
+function quoteSqlIdentifier(name) {
+    return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+function listUserTables(dbConn) {
+    const rows = dbConn
+        .prepare(
+            `SELECT name
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name COLLATE NOCASE`
+        )
+        .all();
+    return rows.map((r) => String(r.name || '')).filter(Boolean);
+}
+
+function tableColumnsInfo(dbConn, tableName) {
+    if (!isSafeSqlIdentifier(tableName)) return [];
+    const sql = `PRAGMA table_info(${quoteSqlIdentifier(tableName)})`;
+    return dbConn.prepare(sql).all();
+}
+
+function tableExists(dbConn, tableName) {
+    if (!isSafeSqlIdentifier(tableName)) return false;
+    const row = dbConn
+        .prepare(
+            `SELECT 1 AS x
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name = ?
+             LIMIT 1`
+        )
+        .get(String(tableName));
+    return !!row;
+}
+
+function readTableRows(dbConn, tableName, limitRaw, offsetRaw) {
+    if (!tableExists(dbConn, tableName)) throw new Error('table not found');
+    const cols = tableColumnsInfo(dbConn, tableName);
+    const colNames = cols.map((c) => String(c.name || '')).filter(Boolean);
+    const primaryKey = cols.filter((c) => Number(c.pk) > 0).sort((a, b) => Number(a.pk) - Number(b.pk)).map((c) => String(c.name));
+    const limit = Math.max(1, Math.min(500, Number(limitRaw || 100) | 0));
+    const offset = Math.max(0, Number(offsetRaw || 0) | 0);
+    const qTable = quoteSqlIdentifier(tableName);
+    let rows = [];
+    let hasRowid = false;
+    try {
+        rows = dbConn
+            .prepare(`SELECT rowid AS __rowid, * FROM ${qTable} LIMIT @lim OFFSET @off`)
+            .all({ lim: limit, off: offset });
+        hasRowid = true;
+    } catch {
+        rows = dbConn
+            .prepare(`SELECT * FROM ${qTable} LIMIT @lim OFFSET @off`)
+            .all({ lim: limit, off: offset });
+        hasRowid = false;
+    }
+    const totalRow = dbConn.prepare(`SELECT COUNT(*) AS c FROM ${qTable}`).get();
+    const total = Number((totalRow && totalRow.c) || 0) | 0;
+    return { columns: colNames, primaryKey, rows, hasRowid, limit, offset, total };
+}
+
+function deleteTableRow(dbConn, tableName, rowidRaw, pkObj) {
+    if (!tableExists(dbConn, tableName)) return 0;
+    const cols = tableColumnsInfo(dbConn, tableName);
+    const colNames = new Set(cols.map((c) => String(c.name || '')).filter(Boolean));
+    const primaryKey = cols.filter((c) => Number(c.pk) > 0).sort((a, b) => Number(a.pk) - Number(b.pk)).map((c) => String(c.name));
+    const qTable = quoteSqlIdentifier(tableName);
+    if (primaryKey.length > 0 && pkObj && typeof pkObj === 'object') {
+        const whereParts = [];
+        const params = {};
+        for (const col of primaryKey) {
+            if (!Object.prototype.hasOwnProperty.call(pkObj, col)) {
+                return 0;
+            }
+            if (!colNames.has(col)) return 0;
+            whereParts.push(`${quoteSqlIdentifier(col)} = @${col}`);
+            params[col] = pkObj[col];
+        }
+        if (!whereParts.length) return 0;
+        const out = dbConn.prepare(`DELETE FROM ${qTable} WHERE ${whereParts.join(' AND ')}`).run(params);
+        return Number(out.changes || 0) | 0;
+    }
+    if (rowidRaw === undefined || rowidRaw === null || rowidRaw === '') return 0;
+    const rowid = Number(rowidRaw);
+    if (!Number.isFinite(rowid)) return 0;
+    const out = dbConn.prepare(`DELETE FROM ${qTable} WHERE rowid = @rowid`).run({ rowid });
+    return Number(out.changes || 0) | 0;
+}
+
 const server = http.createServer((req, res) => {
     const pathOnly = req.url.split('?')[0];
     if (req.method === 'OPTIONS' && pathOnly.startsWith('/api/')) {
@@ -729,6 +824,52 @@ const server = http.createServer((req, res) => {
             console.error(err);
             send(res, 500, String(err.message || err), CORS_API);
         }
+        return;
+    }
+
+    if (req.method === 'GET' && pathOnly === '/api/db/tables') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        try {
+            const tables = listUserTables(db);
+            sendJson(res, 200, { tables }, CORS_API);
+        } catch (err) {
+            send(res, 500, String(err.message || err), CORS_API);
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/db/table') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const table = typeof body.table === 'string' ? body.table.trim() : '';
+                if (!table) return send(res, 400, 'table required', CORS_API);
+                const out = readTableRows(db, table, body.limit, body.offset);
+                sendJson(res, 200, { table, ...out }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/db/delete-row') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const table = typeof body.table === 'string' ? body.table.trim() : '';
+                if (!table) return send(res, 400, 'table required', CORS_API);
+                const changes = deleteTableRow(db, table, body.rowid, body.pk);
+                if (changes < 1) return send(res, 404, 'row not found', CORS_API);
+                recipeIndex = buildRecipeIndex(getItemsMap(db));
+                sendJson(res, 200, { ok: true, changes }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;
     }
 
