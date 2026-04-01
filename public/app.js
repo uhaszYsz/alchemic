@@ -3872,6 +3872,19 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.closePath();
         ctx.fill();
         ctx.restore();
+
+        // Tick-state occupancy indicator (independent from smooth slide interpolation).
+        const busyBit = carryId ? 1 : 0;
+        const label = String(busyBit);
+        ctx.save();
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.font = fs(9);
+        ctx.fillStyle = busyBit ? '#fca5a5' : '#86efac';
+        ctx.shadowColor = 'rgba(2, 6, 23, 0.85)';
+        ctx.shadowBlur = 2 * sc;
+        ctx.fillText(label, w - Math.max(2, 2 * sc), Math.max(1, 1 * sc));
+        ctx.restore();
     } else if (placement === 'extractor') {
         const bx = w * 0.12;
         const bw = w * 0.76;
