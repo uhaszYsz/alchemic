@@ -241,23 +241,51 @@ async function postRejectedCraftRemote(itemAId, itemBId) {
 }
 
 /**
- * Check whether a combo pair is globally marked as rejected.
+ * Check combine result against server-side database.
  * @param {string} itemAId
  * @param {string} itemBId
- * @returns {Promise<boolean>}
+ * @returns {Promise<{ exists: boolean, rejected: boolean, message: string, item: null | { id: string, emoji: string, name: string, a?: string, b?: string, nameColor?: string, iconPath?: string, discoveredAt?: string } }>}
  */
-async function isRejectedCraftRemote(itemAId, itemBId) {
+async function checkCombineRemote(itemAId, itemBId) {
+    const r = await apiFetch('/api/combine/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            item_a_id: String(itemAId || '').trim(),
+            item_b_id: String(itemBId || '').trim()
+        })
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    let payload = null;
     try {
-        const u = new URL(`${apiOrigin()}/api/rejected-crafts/check`);
-        u.searchParams.set('a', String(itemAId || ''));
-        u.searchParams.set('b', String(itemBId || ''));
-        const r = await fetch(u.toString());
-        if (!r.ok) return false;
-        const payload = await r.json();
-        return !!(payload && payload.rejected === true);
+        payload = JSON.parse(t);
     } catch {
-        return false;
+        payload = null;
     }
+    if (!payload || typeof payload !== 'object') {
+        throw new Error('Invalid /api/combine/check response');
+    }
+    const rawItem = payload.item && typeof payload.item === 'object' ? payload.item : null;
+    const item =
+        rawItem && typeof rawItem.id === 'string' && typeof rawItem.name === 'string' && typeof rawItem.emoji === 'string'
+            ? {
+                  id: rawItem.id,
+                  name: rawItem.name,
+                  emoji: rawItem.emoji,
+                  a: typeof rawItem.a === 'string' ? rawItem.a : '',
+                  b: typeof rawItem.b === 'string' ? rawItem.b : '',
+                  nameColor: typeof rawItem.nameColor === 'string' ? rawItem.nameColor : '',
+                  iconPath: typeof rawItem.iconPath === 'string' ? rawItem.iconPath : '',
+                  discoveredAt: typeof rawItem.discoveredAt === 'string' ? rawItem.discoveredAt : ''
+              }
+            : null;
+    return {
+        exists: payload.exists === true && !!item,
+        rejected: payload.rejected === true,
+        message: typeof payload.message === 'string' ? payload.message : '',
+        item
+    };
 }
 
 /** Merge icon paths from GET /api/items into `state.library` and `cachedBaseItemsMap`. */
@@ -1679,7 +1707,6 @@ function updateFactoryUpgradeBar() {
     }
 }
 const modal = document.getElementById('discovery-modal');
-const discoveryCheckModal = document.getElementById('discovery-check-modal');
 const clearBtn = document.getElementById('clear-btn');
 const discoveryTitleEl = document.getElementById('discovery-title');
 const discoverySelectedNameEl = document.getElementById('discovery-selected-name');
@@ -1749,14 +1776,6 @@ function clearAiFullReplyUi() {
         aiReplyFullEl.className = `${AI_REPLY_BASE_CLASS} border border-slate-600 bg-slate-900/70 text-slate-300`;
     }
     if (aiReplyWrap) aiReplyWrap.classList.add('hidden');
-}
-
-function showDiscoveryCheckModal() {
-    if (discoveryCheckModal) discoveryCheckModal.classList.remove('hidden');
-}
-
-function hideDiscoveryCheckModal() {
-    if (discoveryCheckModal) discoveryCheckModal.classList.add('hidden');
 }
 
 function updateFloatingDiscoveryAlert(blink) {
@@ -2623,27 +2642,65 @@ function factoryLibraryStubForId(id) {
 }
 
 function openFactoryCombinerDiscovery(combinerKey, aId, bId, comboKey) {
-    void isRejectedCraftRemote(aId, bId).then((rejected) => {
-        if (rejected) {
-            state.factory.cellRejectFlashUntil[combinerKey] = performance.now() + 1000;
-            delete state.factory.combinerDiscovery[combinerKey];
-            renderFactoryGrid();
-            return;
-        }
-    const a = factoryLibraryStubForId(aId);
-    const b = factoryLibraryStubForId(bId);
-    showDiscoveryCheckModal();
-    fetchAiPropositions(a, b)
-        .then((parsed) => {
-            hideDiscoveryCheckModal();
-            void queueDiscoveryNotice(a, b, comboKey, parsed, combinerKey);
+    void checkCombineRemote(aId, bId)
+        .then((out) => {
+            if (out.rejected) {
+                state.factory.cellRejectFlashUntil[combinerKey] = performance.now() + 1000;
+                delete state.factory.combinerDiscovery[combinerKey];
+                renderFactoryGrid();
+                return;
+            }
+            if (out.exists && out.item) {
+                const known = out.item;
+                state.recipes[comboKey] = { id: known.id, emoji: known.emoji, name: known.name };
+                const li = state.library.findIndex((e) => e.id === known.id);
+                const nextRow = { id: known.id, emoji: known.emoji, name: known.name, tier: 0 };
+                const knownNameColor = normalizeItemNameColor(known.nameColor);
+                if (knownNameColor) nextRow.nameColor = knownNameColor;
+                if (known.iconPath && known.iconPath.trim()) nextRow.iconPath = known.iconPath.trim();
+                if (li >= 0) state.library[li] = { ...state.library[li], ...nextRow };
+                else state.library.push(nextRow);
+                if (cachedBaseItemsMap) {
+                    cachedBaseItemsMap[known.id] = {
+                        ...(cachedBaseItemsMap[known.id] || {}),
+                        id: known.id,
+                        emoji: known.emoji,
+                        name: known.name,
+                        a: known.a || aId,
+                        b: known.b || bId,
+                        nameColor: knownNameColor || undefined,
+                        iconPath: known.iconPath || undefined,
+                        discoveredAt: known.discoveredAt || undefined
+                    };
+                }
+                recomputeAllTiers();
+                renderLibrary();
+                delete state.factory.combinerDiscovery[combinerKey];
+                renderFactoryGrid();
+                return;
+            }
+            const a = factoryLibraryStubForId(aId);
+            const b = factoryLibraryStubForId(bId);
+            openDiscoveryModal(
+                {
+                    a,
+                    b,
+                    key: comboKey,
+                    resultId: '',
+                    resultPlaced: false,
+                    factoryCombKey: combinerKey,
+                    name: '',
+                    emoji: '✨'
+                },
+                undefined
+            );
         })
         .catch((err) => {
             console.error(err);
-            hideDiscoveryCheckModal();
-            void queueDiscoveryNotice(a, b, comboKey, undefined, combinerKey);
+            state.factory.cellRejectFlashUntil[combinerKey] = performance.now() + 1000;
+            delete state.factory.combinerDiscovery[combinerKey];
+            renderFactoryGrid();
         });
-    });
 }
 
 /**
@@ -3508,35 +3565,16 @@ function checkCollisions(movedItem) {
 
 async function combineAsync(a, b) {
     const comboKey = [a.id, b.id].sort().join('+');
-    const result = state.recipes[comboKey];
-
     const oldA = { ...a };
     const oldB = { ...b };
-
-    if (result) {
-        state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
-        const midX = (a.x + b.x) / 2;
-        const midY = (a.y + b.y) / 2;
-
-        if (!state.library.find((el) => el.id === result.id)) {
-            state.library.push({
-                id: result.id,
-                emoji: result.emoji,
-                name: result.name
-            });
-            recomputeAllTiers();
-            renderLibrary();
-        }
-
-        const resultData = state.library.find((el) => el.id === result.id);
-        createElementOnCanvas(resultData, midX + 40, midY + 40);
-        showPulse(midX + 40, midY + 40, 'bg-blue-400');
-        renderCanvas();
+    let out = null;
+    try {
+        out = await checkCombineRemote(String(oldA.id || ''), String(oldB.id || ''));
+    } catch (err) {
+        console.error(err);
         return;
     }
-
-    const rejected = await isRejectedCraftRemote(String(oldA.id || ''), String(oldB.id || ''));
-    if (rejected) {
+    if (out.rejected) {
         state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
         state.activeElements.push(oldA, oldB);
         renderCanvas();
@@ -3545,20 +3583,55 @@ async function combineAsync(a, b) {
         showPulse(midX, midY, 'bg-red-500');
         return;
     }
-
+    if (out.exists && out.item) {
+        const known = out.item;
+        state.recipes[comboKey] = { id: known.id, emoji: known.emoji, name: known.name };
+        const li = state.library.findIndex((el) => el.id === known.id);
+        const nextRow = { id: known.id, emoji: known.emoji, name: known.name, tier: 0 };
+        const knownNameColor = normalizeItemNameColor(known.nameColor);
+        if (knownNameColor) nextRow.nameColor = knownNameColor;
+        if (known.iconPath && known.iconPath.trim()) nextRow.iconPath = known.iconPath.trim();
+        if (li >= 0) state.library[li] = { ...state.library[li], ...nextRow };
+        else state.library.push(nextRow);
+        if (cachedBaseItemsMap) {
+            cachedBaseItemsMap[known.id] = {
+                ...(cachedBaseItemsMap[known.id] || {}),
+                id: known.id,
+                emoji: known.emoji,
+                name: known.name,
+                a: known.a || String(oldA.id || ''),
+                b: known.b || String(oldB.id || ''),
+                nameColor: knownNameColor || undefined,
+                iconPath: known.iconPath || undefined,
+                discoveredAt: known.discoveredAt || undefined
+            };
+        }
+        recomputeAllTiers();
+        renderLibrary();
+        state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
+        const midX = (a.x + b.x) / 2;
+        const midY = (a.y + b.y) / 2;
+        const resultData = state.library.find((el) => el.id === known.id) || nextRow;
+        createElementOnCanvas(resultData, midX + 40, midY + 40);
+        showPulse(midX + 40, midY + 40, 'bg-blue-400');
+        renderCanvas();
+        return;
+    }
     state.activeElements = state.activeElements.filter((el) => el.uid !== a.uid && el.uid !== b.uid);
     renderCanvas();
-    showDiscoveryCheckModal();
-    fetchAiPropositions(oldA, oldB)
-        .then((parsed) => {
-            hideDiscoveryCheckModal();
-            void queueDiscoveryNotice(oldA, oldB, comboKey, parsed, '');
-        })
-        .catch((err) => {
-            console.error(err);
-            hideDiscoveryCheckModal();
-            void queueDiscoveryNotice(oldA, oldB, comboKey, undefined, '');
-        });
+    openDiscoveryModal(
+        {
+            a: oldA,
+            b: oldB,
+            key: comboKey,
+            resultId: '',
+            resultPlaced: false,
+            factoryCombKey: '',
+            name: '',
+            emoji: '✨'
+        },
+        undefined
+    );
 }
 
 /**
@@ -3682,7 +3755,6 @@ if (saveDiscoveryBtn) {
 }
 
 function closeDiscoveryModalFromCancelFlow() {
-    hideDiscoveryCheckModal();
     state.pendingCombination = null;
     state.aiSuggestions = [];
     state.discoverySelectedName = '';

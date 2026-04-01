@@ -773,6 +773,83 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    if (req.method === 'POST' && pathOnly === '/api/combine/check') {
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const idA = typeof body.item_a_id === 'string' ? body.item_a_id.trim() : '';
+                const idB = typeof body.item_b_id === 'string' ? body.item_b_id.trim() : '';
+                if (!idA || !idB) return send(res, 400, 'item_a_id and item_b_id required', CORS_API);
+                const rejected = isRejectedCraft(db, idA, idB);
+                if (rejected) {
+                    return sendJson(
+                        res,
+                        200,
+                        {
+                            exists: false,
+                            rejected: true,
+                            message: 'This combination is rejected globally.',
+                            item: null
+                        },
+                        CORS_API
+                    );
+                }
+                const comboKey = [idA, idB].sort().join('+');
+                const resultId = recipeIndex[comboKey];
+                if (!resultId) {
+                    return sendJson(
+                        res,
+                        200,
+                        {
+                            exists: false,
+                            rejected: false,
+                            message: 'No discovery exists for this pair yet.',
+                            item: null
+                        },
+                        CORS_API
+                    );
+                }
+                const items = getItemsMap(db);
+                const def = items[resultId];
+                if (!def || typeof def !== 'object') {
+                    return sendJson(
+                        res,
+                        200,
+                        {
+                            exists: false,
+                            rejected: false,
+                            message: 'Recipe found but item record missing.',
+                            item: null
+                        },
+                        CORS_API
+                    );
+                }
+                return sendJson(
+                    res,
+                    200,
+                    {
+                        exists: true,
+                        rejected: false,
+                        message: 'Known discovery found.',
+                        item: {
+                            id: resultId,
+                            emoji: typeof def.emoji === 'string' ? def.emoji : '✨',
+                            name: typeof def.name === 'string' ? def.name : resultId,
+                            a: typeof def.a === 'string' ? def.a : '',
+                            b: typeof def.b === 'string' ? def.b : '',
+                            nameColor: typeof def.nameColor === 'string' ? def.nameColor : '',
+                            iconPath: typeof def.iconPath === 'string' ? def.iconPath : '',
+                            discoveredAt: typeof def.discoveredAt === 'string' ? def.discoveredAt : ''
+                        }
+                    },
+                    CORS_API
+                );
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
     if (req.method === 'POST' && pathOnly === '/api/rejected-crafts') {
         readRequestBody(req)
             .then((raw) => {
