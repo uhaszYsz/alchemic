@@ -27,7 +27,11 @@ import {
     getSessionByTokenHash,
     deleteSessionByTokenHash,
     getUserInventoryMap,
-    addToUserInventory
+    addToUserInventory,
+    saveUserFactoryState,
+    loadUserFactoryState,
+    addFactorySnapshoot,
+    loadLatestFactorySnapshoot
 } from './db.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -456,6 +460,15 @@ function tickAllFactories() {
             }
             st._factoryRunUntilAt = 0;
             st._factoryRunStartedAt = 0;
+            persistFactoryState(userId, st);
+            try {
+                addFactorySnapshoot(db, userId, JSON.stringify(st));
+            } catch (err) {
+                console.warn(
+                    `[factory-snapshoot] user=${Number(userId) | 0} err=${String(err && err.message ? err.message : err)}`
+                );
+            }
+            factoryStateByUser.delete(userId);
             continue;
         }
         const elapsed = Math.max(0, now - Number(st._serverLastTickAt || now));
@@ -499,11 +512,34 @@ function sanitizeInventoryMap(raw) {
     return out;
 }
 
+function persistFactoryState(userId, st) {
+    const uid = Number(userId) | 0;
+    if (!uid || !st || typeof st !== 'object') return;
+    try {
+        saveUserFactoryState(db, uid, JSON.stringify(st));
+    } catch (err) {
+        console.warn(`[factory-persist] user=${uid} err=${String(err && err.message ? err.message : err)}`);
+    }
+}
+
 function getOrInitFactoryState(userId) {
-    const uid = Number(userId);
+    const uid = Number(userId) | 0;
+    if (!uid) return defaultFactoryState();
     const fromMem = factoryStateByUser.get(uid);
     if (fromMem) return fromMem;
-    const st = defaultFactoryState();
+    let st = null;
+    try {
+        const stateJson = loadUserFactoryState(db, uid) || loadLatestFactorySnapshoot(db, uid);
+        if (stateJson) {
+            const parsed = parseBody(stateJson);
+            if (parsed && typeof parsed === 'object') {
+                st = sanitizeFactoryState(parsed);
+            }
+        }
+    } catch (err) {
+        console.warn(`[factory-load] user=${uid} err=${String(err && err.message ? err.message : err)}`);
+    }
+    if (!st) st = defaultFactoryState();
     factoryStateByUser.set(uid, st);
     return st;
 }
@@ -1197,6 +1233,7 @@ const server = http.createServer((req, res) => {
             addToUserInventory(db, auth.userId, pending);
             granted = pending;
             st._factoryPendingProduced = {};
+            persistFactoryState(auth.userId, st);
             console.log(`[inventory-open grant] user=${auth.userId} granted=${JSON.stringify(granted)}`);
         }
         sendJson(
@@ -1266,6 +1303,7 @@ const server = http.createServer((req, res) => {
                 st._factoryRunStoppedAtIso = prev._factoryRunStoppedAtIso || null;
                 activateFactoryRunWindow(st, Date.now());
                 factoryStateByUser.set(auth.userId, st);
+                persistFactoryState(auth.userId, st);
                 sendJson(
                     res,
                     200,

@@ -143,6 +143,15 @@ export function openDb() {
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
+        CREATE TABLE IF NOT EXISTS snapshoots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            state_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshoots_user_created
+            ON snapshoots(user_id, created_at DESC);
     `);
     migrateItemsIconPath(db);
     migrateItemsDiscoveredBy(db);
@@ -684,6 +693,39 @@ export function saveUserFactoryState(db, userId, stateJson) {
  */
 export function loadUserFactoryState(db, userId) {
     const row = db.prepare('SELECT state_json FROM user_factory_state WHERE user_id = ?').get(Number(userId));
+    return row ? String(row.state_json) : null;
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @param {string} stateJson
+ */
+export function addFactorySnapshoot(db, userId, stateJson) {
+    db.prepare(
+        `INSERT INTO snapshoots (user_id, state_json, created_at)
+         VALUES (@user_id, @state_json, datetime('now'))`
+    ).run({
+        user_id: Number(userId),
+        state_json: String(stateJson)
+    });
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @returns {string | null}
+ */
+export function loadLatestFactorySnapshoot(db, userId) {
+    const row = db
+        .prepare(
+            `SELECT state_json
+             FROM snapshoots
+             WHERE user_id = @user_id
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1`
+        )
+        .get({ user_id: Number(userId) });
     return row ? String(row.state_json) : null;
 }
 
