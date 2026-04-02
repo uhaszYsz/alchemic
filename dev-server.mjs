@@ -253,11 +253,21 @@ function factoryMaterialFromCornerSources(state, col, row) {
     return uniq.sort((a, b) => order[a] - order[b])[0];
 }
 
+/** NW wood, NE stone, SW flint, SE plants — matches client factoryFixedGatheringHubMaterialId. */
+function factoryFixedGatheringHubMaterialId(state, col, row) {
+    if (!factoryInBounds(state, col, row)) return null;
+    const last = factoryGridCols(state) - 1;
+    if (last < 1) return null;
+    if (col === 0 && row === 0) return 'wood';
+    if (col === last && row === 0) return 'stone';
+    if (col === 0 && row === last) return 'flint';
+    if (col === last && row === last) return 'plants';
+    return null;
+}
+
 function factoryCellResourceId(state, col, row) {
     const key = factoryPlacementKey(col, row);
-    const gp = state.gatheringPoints && typeof state.gatheringPoints === 'object' ? state.gatheringPoints : {};
-    const hubHere = gp[key];
-    if (hubHere && typeof hubHere === 'string' && hubHere.trim()) {
+    if (factoryFixedGatheringHubMaterialId(state, col, row)) {
         return null;
     }
     const ring = [
@@ -274,9 +284,8 @@ function factoryCellResourceId(state, col, row) {
         const nc = col + dc;
         const nr = row + dr;
         if (!factoryInBounds(state, nc, nr)) continue;
-        const nk = factoryPlacementKey(nc, nr);
-        const m = gp[nk];
-        if (m && typeof m === 'string' && m.trim()) return m.trim();
+        const hubId = factoryFixedGatheringHubMaterialId(state, nc, nr);
+        if (hubId) return hubId;
     }
     const stored = state.cellResources[key];
     if (stored && typeof stored === 'string' && stored.trim()) return stored.trim();
@@ -308,7 +317,6 @@ function defaultFactoryState() {
         placements: {},
         selectedBuilding: null,
         cellResources: {},
-        gatheringPoints: {},
         transporterDirs: {},
         sorterDirs: {},
         sorterItemFilters: {},
@@ -346,7 +354,6 @@ function sanitizeFactoryState(raw) {
     const st = { ...base, ...raw };
     st.placements = typeof raw.placements === 'object' && raw.placements ? raw.placements : {};
     st.cellResources = typeof raw.cellResources === 'object' && raw.cellResources ? raw.cellResources : {};
-    st.gatheringPoints = typeof raw.gatheringPoints === 'object' && raw.gatheringPoints ? raw.gatheringPoints : {};
     st.transporterDirs = typeof raw.transporterDirs === 'object' && raw.transporterDirs ? raw.transporterDirs : {};
     st.sorterDirs = typeof raw.sorterDirs === 'object' && raw.sorterDirs ? raw.sorterDirs : {};
     st.sorterItemFilters = typeof raw.sorterItemFilters === 'object' && raw.sorterItemFilters ? raw.sorterItemFilters : {};
@@ -387,6 +394,7 @@ function sanitizeFactoryState(raw) {
             : null;
     st._factoryIdleRemainder =
         typeof raw._factoryIdleRemainder === 'object' && raw._factoryIdleRemainder ? raw._factoryIdleRemainder : {};
+    delete st.gatheringPoints;
     return st;
 }
 
@@ -631,7 +639,6 @@ function factoryClientSnapshot(state) {
         placements: state.placements || {},
         selectedBuilding: state.selectedBuilding || null,
         cellResources: state.cellResources || {},
-        gatheringPoints: state.gatheringPoints || {},
         transporterDirs: state.transporterDirs || {},
         sorterDirs: state.sorterDirs || {},
         sorterItemFilters: state.sorterItemFilters || {},
