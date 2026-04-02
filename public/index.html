@@ -266,6 +266,16 @@
             object-fit: contain;
             object-position: center;
         }
+        #discovery-edit-ai-image-grid .discovery-edit-ai-image-choice {
+            aspect-ratio: 1;
+            min-height: 0;
+        }
+        #discovery-edit-ai-image-grid .discovery-edit-ai-image-choice img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            object-position: center;
+        }
         .library-item-icon-img {
             width: 2.5rem;
             height: 2.5rem;
@@ -534,9 +544,72 @@
                     <input type="search" id="discovery-edit-search-input" autocomplete="off" class="w-full min-h-[40px] px-2 py-1.5 rounded-md bg-slate-900 border border-slate-600 text-sm text-slate-100 placeholder:text-slate-500" placeholder="Search item names…" />
                     <div id="discovery-edit-search-results" class="mt-2 max-h-44 overflow-y-auto space-y-1"></div>
                 </div>
+                <div class="border-t border-slate-700 pt-3 space-y-2">
+                    <div class="text-xs text-slate-400">Icon image</div>
+                    <div class="flex flex-wrap gap-2">
+                        <input id="discovery-edit-ai-image-query" type="text" placeholder="Search icon query" class="flex-1 min-w-[8rem] bg-slate-900/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
+                        <button type="button" id="discovery-edit-ai-image-btn" class="py-2.5 px-3 bg-indigo-700 hover:bg-indigo-600 text-indigo-100 text-sm font-semibold rounded-lg transition whitespace-nowrap">
+                            Search icons
+                        </button>
+                        <button type="button" id="discovery-edit-open-custom-icon" class="py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold rounded-lg transition whitespace-nowrap">
+                            Custom icon
+                        </button>
+                    </div>
+                    <p id="discovery-edit-ai-image-status" class="text-xs text-slate-400 min-h-[1rem]"></p>
+                    <img id="discovery-edit-ai-image-img" class="hidden mx-auto max-w-[120px] max-h-[120px] object-contain rounded border border-slate-600 bg-slate-900/70 p-1" alt="Selected icon preview" />
+                    <div id="discovery-edit-ai-image-grid" class="hidden mt-2 grid grid-cols-4 gap-2">
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                        <button type="button" class="discovery-edit-ai-image-choice hidden rounded-lg border border-slate-600 bg-slate-900/70 p-1 overflow-hidden" aria-pressed="false"><img alt="" loading="lazy" /></button>
+                    </div>
+                    <div class="flex items-center justify-between gap-2">
+                        <button id="discovery-edit-ai-image-prev" type="button" class="min-h-[36px] px-3 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold">
+                            Prev
+                        </button>
+                        <p id="discovery-edit-ai-image-page" class="text-xs text-slate-400">Page 1</p>
+                        <button id="discovery-edit-ai-image-next" type="button" class="min-h-[36px] px-3 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-xs font-semibold">
+                            Next
+                        </button>
+                    </div>
+                    <button type="button" id="discovery-edit-save-icon" class="w-full min-h-[40px] px-3 py-2 rounded-lg bg-blue-700 hover:bg-blue-600 border border-blue-600 text-blue-100 text-sm font-semibold disabled:opacity-40 disabled:pointer-events-none" disabled>
+                        Save icon to item
+                    </button>
+                </div>
                 <button type="button" id="discovery-edit-delete" class="w-full min-h-[44px] px-3 py-2 rounded-lg vote-pill vote-pill--down text-sm font-semibold">
                     Delete from database
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="discovery-edit-custom-icon-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[70] backdrop-blur-sm px-3">
+        <div class="bg-slate-800 p-6 rounded-2xl border border-blue-500/50 shadow-2xl max-w-xl w-full">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-lg font-semibold text-slate-100">Custom icon</h3>
+                <button type="button" id="close-discovery-edit-custom-icon" class="min-h-[40px] px-3 py-2 rounded-lg bg-slate-700 border border-slate-600 text-slate-200 text-sm font-semibold">Close</button>
+            </div>
+            <div class="space-y-3">
+                <div class="flex gap-2 flex-wrap">
+                    <input id="discovery-edit-icon-url" type="url" placeholder="https://example.com/icon.png" class="flex-1 min-w-[10rem] bg-slate-800/90 border border-blue-500/40 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/40" />
+                    <button type="button" id="discovery-edit-apply-icon-url" class="py-2.5 px-3 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-semibold rounded-lg transition">
+                        Use URL
+                    </button>
+                    <button type="button" id="discovery-edit-upload-icon-btn" class="py-2.5 px-3 bg-blue-700 hover:bg-blue-600 text-blue-100 text-sm font-semibold rounded-lg transition">
+                        Upload
+                    </button>
+                    <input id="discovery-edit-upload-icon-file" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif" class="hidden" />
+                </div>
+                <p id="discovery-edit-custom-icon-status" class="text-xs text-slate-400 min-h-[1rem]"></p>
+                <div class="flex justify-end pt-1">
+                    <button type="button" id="discovery-edit-custom-icon-ok" class="min-h-[40px] px-4 py-2 rounded-lg bg-blue-700 border border-blue-600 text-blue-100 text-sm font-semibold">
+                        OK
+                    </button>
+                </div>
             </div>
         </div>
     </div>

@@ -115,6 +115,10 @@ let discoveryEditTargetId = '';
 /** @type {'' | 'a' | 'b'} */
 let discoveryEditSlot = '';
 let discoveryEditSearchTimer = 0;
+let discoveryEditIconPreviewUrl = '';
+let discoveryEditIconPreviewDataUrl = '';
+let discoveryEditIconSearchPage = 0;
+let discoveryEditIconSearchLastCount = 0;
 let dbViewerTables = [];
 let dbViewerSelectedTable = '';
 let dbViewerPrimaryKey = [];
@@ -1319,6 +1323,7 @@ function setDiscoveryEditModalOpen(open) {
             clearTimeout(discoveryEditSearchTimer);
             discoveryEditSearchTimer = 0;
         }
+        resetDiscoveryEditImageUi();
     }
 }
 
@@ -1356,6 +1361,11 @@ function openDiscoveryEditModal(row) {
     if (discoveryEditItemNameEl) discoveryEditItemNameEl.textContent = row.name || row.id;
     fillDiscoveryEditIngredientLabels(row);
     hideDiscoveryEditPicker();
+    resetDiscoveryEditImageUi();
+    const n = String(row.name || row.id || '').trim();
+    if (discoveryEditAiImageQueryInput && n) {
+        discoveryEditAiImageQueryInput.value = `${n} isometric`;
+    }
     setDiscoveryEditModalOpen(true);
 }
 
@@ -1397,6 +1407,238 @@ function scheduleDiscoveryEditSearch() {
         discoveryEditSearchTimer = 0;
         void runDiscoveryEditSearch();
     }, 220);
+}
+
+function clearDiscoveryEditAiImageGrid() {
+    if (!discoveryEditAiImageGridEl) return;
+    discoveryEditAiImageGridEl.classList.add('hidden');
+    const choices = discoveryEditAiImageGridEl.querySelectorAll('.discovery-edit-ai-image-choice');
+    choices.forEach((btn) => {
+        btn.classList.add('hidden');
+        const img = btn.querySelector('img');
+        if (img) img.removeAttribute('src');
+        btn.classList.remove('ring-2', 'ring-blue-400', 'border-blue-500');
+        btn.classList.add('border-slate-600');
+        btn.removeAttribute('aria-pressed');
+    });
+}
+
+function syncDiscoveryEditImagePagerUi() {
+    if (discoveryEditAiImagePageEl) {
+        discoveryEditAiImagePageEl.textContent = `Page ${discoveryEditIconSearchPage + 1}`;
+    }
+    if (discoveryEditAiImagePrevBtn) discoveryEditAiImagePrevBtn.disabled = discoveryEditIconSearchPage <= 0;
+    if (discoveryEditAiImageNextBtn) {
+        discoveryEditAiImageNextBtn.disabled = discoveryEditIconSearchLastCount < DISCOVERY_ICON_VARIANT_COUNT;
+    }
+}
+
+/**
+ * @param {string} url
+ * @param {HTMLElement} selectedBtn
+ */
+function selectDiscoveryEditAiCandidate(url, selectedBtn) {
+    discoveryEditIconPreviewUrl = url;
+    discoveryEditIconPreviewDataUrl = '';
+    if (discoveryEditAiImageImgEl) {
+        discoveryEditAiImageImgEl.src = url;
+        discoveryEditAiImageImgEl.classList.remove('hidden');
+    }
+    if (!discoveryEditAiImageGridEl) return;
+    const choices = discoveryEditAiImageGridEl.querySelectorAll('.discovery-edit-ai-image-choice');
+    choices.forEach((btn) => {
+        const on = btn === selectedBtn;
+        btn.classList.toggle('ring-2', on);
+        btn.classList.toggle('ring-blue-400', on);
+        btn.classList.toggle('border-blue-500', on);
+        btn.classList.toggle('border-slate-600', !on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    if (discoveryEditSaveIconBtn) discoveryEditSaveIconBtn.disabled = false;
+}
+
+function unselectDiscoveryEditAiCandidate() {
+    discoveryEditIconPreviewUrl = '';
+    discoveryEditIconPreviewDataUrl = '';
+    if (discoveryEditAiImageImgEl) {
+        discoveryEditAiImageImgEl.removeAttribute('src');
+        discoveryEditAiImageImgEl.classList.add('hidden');
+    }
+    if (discoveryEditAiImageGridEl) {
+        const choices = discoveryEditAiImageGridEl.querySelectorAll('.discovery-edit-ai-image-choice');
+        choices.forEach((btn) => {
+            btn.classList.remove('ring-2', 'ring-blue-400', 'border-blue-500');
+            btn.classList.add('border-slate-600');
+            btn.setAttribute('aria-pressed', 'false');
+        });
+    }
+    if (discoveryEditSaveIconBtn) discoveryEditSaveIconBtn.disabled = true;
+}
+
+/**
+ * @param {string[]} urls
+ */
+function renderDiscoveryEditAiCandidates(urls) {
+    clearDiscoveryEditAiImageGrid();
+    if (!discoveryEditAiImageGridEl) return;
+    const list = urls
+        .filter((u) => typeof u === 'string' && u.trim())
+        .slice(0, DISCOVERY_ICON_VARIANT_COUNT);
+    if (!list.length) return;
+    const choices = discoveryEditAiImageGridEl.querySelectorAll('.discovery-edit-ai-image-choice');
+    discoveryEditAiImageGridEl.classList.remove('hidden');
+    list.forEach((u, i) => {
+        const btn = choices[i];
+        if (!btn) return;
+        const img = btn.querySelector('img');
+        if (img) img.src = u;
+        btn.classList.remove('hidden');
+    });
+}
+
+/** @returns {string} */
+function defaultDiscoveryEditImageQuery() {
+    const name = discoveryEditItemNameEl ? discoveryEditItemNameEl.textContent.trim() : '';
+    const base = name || discoveryEditTargetId || 'item';
+    return `${base} isometric`;
+}
+
+/** @returns {string} */
+function buildDiscoveryEditImageQuery() {
+    const typed = discoveryEditAiImageQueryInput ? discoveryEditAiImageQueryInput.value.trim() : '';
+    if (typed) return typed;
+    return defaultDiscoveryEditImageQuery();
+}
+
+function resetDiscoveryEditImageUi() {
+    discoveryEditIconPreviewUrl = '';
+    discoveryEditIconPreviewDataUrl = '';
+    discoveryEditIconSearchPage = 0;
+    discoveryEditIconSearchLastCount = 0;
+    if (discoveryEditAiImageQueryInput) discoveryEditAiImageQueryInput.value = '';
+    if (discoveryEditAiImageStatusEl) discoveryEditAiImageStatusEl.textContent = '';
+    if (discoveryEditAiImageImgEl) {
+        discoveryEditAiImageImgEl.removeAttribute('src');
+        discoveryEditAiImageImgEl.classList.add('hidden');
+    }
+    if (discoveryEditSaveIconBtn) discoveryEditSaveIconBtn.disabled = true;
+    if (discoveryEditAiImageBtn) discoveryEditAiImageBtn.disabled = false;
+    if (discoveryEditApplyIconUrlBtn) discoveryEditApplyIconUrlBtn.disabled = false;
+    if (discoveryEditUploadIconBtn) discoveryEditUploadIconBtn.disabled = false;
+    if (discoveryEditIconUrlInput) discoveryEditIconUrlInput.value = '';
+    if (discoveryEditUploadIconFileInput) discoveryEditUploadIconFileInput.value = '';
+    if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = '';
+    if (discoveryEditCustomIconModalEl) discoveryEditCustomIconModalEl.classList.add('hidden');
+    syncDiscoveryEditImagePagerUi();
+    clearDiscoveryEditAiImageGrid();
+}
+
+async function generateDiscoveryEditIconPreview(targetPage) {
+    if (!discoveryEditAiImageBtn) return;
+    const page = Math.max(0, Number(targetPage ?? discoveryEditIconSearchPage) | 0);
+    discoveryEditAiImageBtn.disabled = true;
+    if (discoveryEditSaveIconBtn) discoveryEditSaveIconBtn.disabled = true;
+    if (discoveryEditAiImagePrevBtn) discoveryEditAiImagePrevBtn.disabled = true;
+    if (discoveryEditAiImageNextBtn) discoveryEditAiImageNextBtn.disabled = true;
+    if (discoveryEditAiImageStatusEl) {
+        discoveryEditAiImageStatusEl.textContent = 'Searching isometric images…';
+    }
+    clearDiscoveryEditAiImageGrid();
+    unselectDiscoveryEditAiCandidate();
+    try {
+        const query = buildDiscoveryEditImageQuery();
+        const out = await fetchImageSearchResults({
+            query,
+            limit: DISCOVERY_ICON_VARIANT_COUNT,
+            offset: page * DISCOVERY_ICON_VARIANT_COUNT
+        });
+        const urls = Array.isArray(out && out.images) ? out.images : [];
+        if (!urls.length) throw new Error('No image URLs in response');
+        renderDiscoveryEditAiCandidates(urls);
+        discoveryEditIconSearchPage = page;
+        discoveryEditIconSearchLastCount = urls.length;
+        if (discoveryEditAiImageStatusEl) {
+            discoveryEditAiImageStatusEl.textContent = `Found ${urls.length} images. Tap one to select, then save.`;
+        }
+    } catch (err) {
+        let msg = err && typeof err.message === 'string' ? err.message : String(err);
+        discoveryEditIconSearchLastCount = 0;
+        clearDiscoveryEditAiImageGrid();
+        if (discoveryEditAiImageStatusEl) {
+            discoveryEditAiImageStatusEl.textContent = `Image search failed. ${msg.slice(0, 220)}`;
+        }
+    } finally {
+        if (discoveryEditAiImageBtn) discoveryEditAiImageBtn.disabled = false;
+        if (discoveryEditSaveIconBtn) discoveryEditSaveIconBtn.disabled = !discoveryEditIconPreviewUrl && !discoveryEditIconPreviewDataUrl;
+        syncDiscoveryEditImagePagerUi();
+    }
+}
+
+async function applyDiscoveryEditIconFromUrl() {
+    const raw = discoveryEditIconUrlInput ? discoveryEditIconUrlInput.value.trim() : '';
+    if (!raw) {
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = 'Enter an image URL first.';
+        return;
+    }
+    let parsed;
+    try {
+        parsed = new URL(raw);
+    } catch {
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = 'That URL is not valid.';
+        return;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = 'Use an http or https image URL.';
+        return;
+    }
+    if (discoveryEditApplyIconUrlBtn) discoveryEditApplyIconUrlBtn.disabled = true;
+    if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = 'Using URL…';
+    try {
+        discoveryEditIconPreviewDataUrl = '';
+        discoveryEditIconPreviewUrl = raw;
+        clearDiscoveryEditAiImageGrid();
+        if (discoveryEditAiImageImgEl) {
+            discoveryEditAiImageImgEl.src = raw;
+            discoveryEditAiImageImgEl.classList.remove('hidden');
+        }
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = 'Custom icon selected.';
+        if (discoveryEditAiImageStatusEl) discoveryEditAiImageStatusEl.textContent = 'Custom icon selected.';
+        if (discoveryEditSaveIconBtn) discoveryEditSaveIconBtn.disabled = false;
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = msg.slice(0, 280);
+    } finally {
+        if (discoveryEditApplyIconUrlBtn) discoveryEditApplyIconUrlBtn.disabled = false;
+    }
+}
+
+async function applyDiscoveryEditIconFromUpload(file) {
+    const v = validateDiscoveryUploadFile(file);
+    if (!v.ok) {
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = v.message;
+        return;
+    }
+    if (discoveryEditUploadIconBtn) discoveryEditUploadIconBtn.disabled = true;
+    if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = 'Uploading…';
+    try {
+        const imageDataUrl = await fileToDataUrl(file);
+        discoveryEditIconPreviewDataUrl = imageDataUrl;
+        discoveryEditIconPreviewUrl = '';
+        clearDiscoveryEditAiImageGrid();
+        if (discoveryEditAiImageImgEl) {
+            discoveryEditAiImageImgEl.src = imageDataUrl;
+            discoveryEditAiImageImgEl.classList.remove('hidden');
+        }
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = 'Custom upload selected.';
+        if (discoveryEditAiImageStatusEl) discoveryEditAiImageStatusEl.textContent = 'Custom icon selected.';
+        if (discoveryEditSaveIconBtn) discoveryEditSaveIconBtn.disabled = false;
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = msg.slice(0, 280);
+    } finally {
+        if (discoveryEditUploadIconBtn) discoveryEditUploadIconBtn.disabled = false;
+        if (discoveryEditUploadIconFileInput) discoveryEditUploadIconFileInput.value = '';
+    }
 }
 
 /** @returns {Promise<string[]>} */
@@ -2025,6 +2267,32 @@ const discoveryEditPickerLabelEl = document.getElementById('discovery-edit-picke
 const discoveryEditSearchInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-edit-search-input'));
 const discoveryEditSearchResultsEl = document.getElementById('discovery-edit-search-results');
 const discoveryEditDeleteBtn = document.getElementById('discovery-edit-delete');
+const discoveryEditAiImageBtn = document.getElementById('discovery-edit-ai-image-btn');
+const discoveryEditOpenCustomIconBtn = document.getElementById('discovery-edit-open-custom-icon');
+const discoveryEditAiImageStatusEl = document.getElementById('discovery-edit-ai-image-status');
+const discoveryEditAiImageGridEl = document.getElementById('discovery-edit-ai-image-grid');
+const discoveryEditAiImageQueryInput = /** @type {HTMLInputElement | null} */ (
+    document.getElementById('discovery-edit-ai-image-query')
+);
+const discoveryEditAiImagePrevBtn = document.getElementById('discovery-edit-ai-image-prev');
+const discoveryEditAiImageNextBtn = document.getElementById('discovery-edit-ai-image-next');
+const discoveryEditAiImagePageEl = document.getElementById('discovery-edit-ai-image-page');
+const discoveryEditAiImageImgEl = /** @type {HTMLImageElement | null} */ (
+    document.getElementById('discovery-edit-ai-image-img')
+);
+const discoveryEditSaveIconBtn = document.getElementById('discovery-edit-save-icon');
+const discoveryEditCustomIconModalEl = document.getElementById('discovery-edit-custom-icon-modal');
+const discoveryEditCustomIconCloseBtn = document.getElementById('close-discovery-edit-custom-icon');
+const discoveryEditCustomIconOkBtn = document.getElementById('discovery-edit-custom-icon-ok');
+const discoveryEditIconUrlInput = /** @type {HTMLInputElement | null} */ (
+    document.getElementById('discovery-edit-icon-url')
+);
+const discoveryEditApplyIconUrlBtn = document.getElementById('discovery-edit-apply-icon-url');
+const discoveryEditUploadIconBtn = document.getElementById('discovery-edit-upload-icon-btn');
+const discoveryEditUploadIconFileInput = /** @type {HTMLInputElement | null} */ (
+    document.getElementById('discovery-edit-upload-icon-file')
+);
+const discoveryEditCustomIconStatusEl = document.getElementById('discovery-edit-custom-icon-status');
 const dbViewerModalEl = document.getElementById('db-viewer-modal');
 const closeDbViewerBtn = document.getElementById('close-db-viewer');
 const dbViewerTableSelectEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('db-viewer-table-select'));
@@ -5569,6 +5837,134 @@ if (discoveryEditDeleteBtn) {
             alert(msg.slice(0, 240));
         } finally {
             discoveryEditDeleteBtn.removeAttribute('disabled');
+        }
+    });
+}
+
+if (discoveryEditAiImageGridEl) {
+    discoveryEditAiImageGridEl.addEventListener('click', (ev) => {
+        const t = ev.target;
+        if (!t || !(t instanceof Element)) return;
+        const btn = t.closest('.discovery-edit-ai-image-choice');
+        if (!btn || btn.classList.contains('hidden')) return;
+        const img = btn.querySelector('img');
+        const u = img && img.getAttribute('src');
+        if (!u) return;
+        const isSelected = btn.getAttribute('aria-pressed') === 'true' && discoveryEditIconPreviewUrl === u;
+        if (isSelected) {
+            unselectDiscoveryEditAiCandidate();
+            return;
+        }
+        selectDiscoveryEditAiCandidate(u, /** @type {HTMLElement} */ (btn));
+    });
+}
+if (discoveryEditAiImageBtn) {
+    discoveryEditAiImageBtn.addEventListener('click', () => {
+        discoveryEditIconSearchPage = 0;
+        void generateDiscoveryEditIconPreview(0);
+    });
+}
+if (discoveryEditOpenCustomIconBtn) {
+    discoveryEditOpenCustomIconBtn.addEventListener('click', () => {
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = '';
+        if (discoveryEditCustomIconModalEl) discoveryEditCustomIconModalEl.classList.remove('hidden');
+    });
+}
+if (discoveryEditCustomIconCloseBtn) {
+    discoveryEditCustomIconCloseBtn.addEventListener('click', () => {
+        if (discoveryEditCustomIconModalEl) discoveryEditCustomIconModalEl.classList.add('hidden');
+    });
+}
+if (discoveryEditCustomIconOkBtn) {
+    discoveryEditCustomIconOkBtn.addEventListener('click', () => {
+        const hasCustom =
+            !!String(discoveryEditIconPreviewUrl || '').trim() || !!String(discoveryEditIconPreviewDataUrl || '').trim();
+        if (!hasCustom) {
+            if (discoveryEditCustomIconStatusEl) {
+                discoveryEditCustomIconStatusEl.textContent = 'Pick icon URL or upload first.';
+            }
+            return;
+        }
+        if (discoveryEditCustomIconStatusEl) discoveryEditCustomIconStatusEl.textContent = '';
+        if (discoveryEditCustomIconModalEl) discoveryEditCustomIconModalEl.classList.add('hidden');
+    });
+}
+if (discoveryEditAiImageQueryInput) {
+    discoveryEditAiImageQueryInput.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        discoveryEditIconSearchPage = 0;
+        void generateDiscoveryEditIconPreview(0);
+    });
+}
+if (discoveryEditApplyIconUrlBtn) {
+    discoveryEditApplyIconUrlBtn.addEventListener('click', () => {
+        void applyDiscoveryEditIconFromUrl();
+    });
+}
+if (discoveryEditUploadIconBtn && discoveryEditUploadIconFileInput) {
+    discoveryEditUploadIconBtn.addEventListener('click', () => {
+        discoveryEditUploadIconFileInput.click();
+    });
+    discoveryEditUploadIconFileInput.addEventListener('change', () => {
+        const file = discoveryEditUploadIconFileInput.files && discoveryEditUploadIconFileInput.files[0];
+        if (!file) return;
+        void applyDiscoveryEditIconFromUpload(file);
+    });
+}
+if (discoveryEditIconUrlInput) {
+    discoveryEditIconUrlInput.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            void applyDiscoveryEditIconFromUrl();
+        }
+    });
+}
+if (discoveryEditAiImagePrevBtn) {
+    discoveryEditAiImagePrevBtn.addEventListener('click', () => {
+        if (discoveryEditIconSearchPage <= 0) return;
+        void generateDiscoveryEditIconPreview(discoveryEditIconSearchPage - 1);
+    });
+}
+if (discoveryEditAiImageNextBtn) {
+    discoveryEditAiImageNextBtn.addEventListener('click', () => {
+        if (discoveryEditIconSearchLastCount < DISCOVERY_ICON_VARIANT_COUNT) return;
+        void generateDiscoveryEditIconPreview(discoveryEditIconSearchPage + 1);
+    });
+}
+if (discoveryEditSaveIconBtn) {
+    discoveryEditSaveIconBtn.addEventListener('click', async () => {
+        const itemId = discoveryEditTargetId;
+        const url = String(discoveryEditIconPreviewUrl || '').trim();
+        const dataUrl = String(discoveryEditIconPreviewDataUrl || '').trim();
+        if (!itemId || (!url && !dataUrl)) return;
+        discoveryEditSaveIconBtn.disabled = true;
+        try {
+            if (dataUrl) {
+                const out = await postSaveItemIconRemote(itemId, '', {
+                    strictUserUrl: true,
+                    imageDataUrl: dataUrl
+                });
+                if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
+                    persistIconPathForItem(itemId, out.iconPath.trim());
+                }
+            } else {
+                const out = await postSaveItemIconRemote(itemId, url);
+                if (typeof out.iconPath === 'string' && out.iconPath.trim()) {
+                    persistIconPathForItem(itemId, out.iconPath.trim());
+                }
+            }
+            await reloadCatalogFromApi();
+            await refreshGlobalDiscoveriesFromApi();
+            renderGlobalDiscoveriesPage();
+            if (discoveryEditAiImageStatusEl) {
+                discoveryEditAiImageStatusEl.textContent = 'Icon saved.';
+            }
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            if (discoveryEditAiImageStatusEl) discoveryEditAiImageStatusEl.textContent = msg.slice(0, 280);
+        } finally {
+            discoveryEditSaveIconBtn.disabled = !discoveryEditIconPreviewUrl && !discoveryEditIconPreviewDataUrl;
         }
     });
 }
