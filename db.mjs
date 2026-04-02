@@ -366,6 +366,40 @@ export function setItemItemType(db, itemId, itemType) {
     return { ok: true };
 }
 
+const ITEM_DISPLAY_NAME_MAX_LEN = 40;
+
+/**
+ * Rename catalog item display name (unique case-insensitive).
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @param {string} newName
+ * @returns {{ ok: boolean, error?: string }}
+ */
+export function setItemDisplayName(db, itemId, newName) {
+    const id = String(itemId || '').trim();
+    const normalized = String(newName || '').trim();
+    if (!id) return { ok: false, error: 'missing id' };
+    if (!normalized) return { ok: false, error: 'name required' };
+    if (normalized.length > ITEM_DISPLAY_NAME_MAX_LEN) {
+        return { ok: false, error: `name too long (max ${ITEM_DISPLAY_NAME_MAX_LEN})` };
+    }
+    if (!itemIdExists(db, id)) return { ok: false, error: 'item not found' };
+    const conflict = findItemByName(db, normalized);
+    if (conflict && conflict.id !== id) {
+        return { ok: false, error: 'another item already uses this name' };
+    }
+    try {
+        db.prepare('UPDATE items SET name = @name WHERE id = @id').run({ id, name: normalized });
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        if (/unique constraint failed:\s*items\.name/i.test(msg)) {
+            return { ok: false, error: 'another item already uses this name' };
+        }
+        return { ok: false, error: msg || 'update failed' };
+    }
+    return { ok: true };
+}
+
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {string} name

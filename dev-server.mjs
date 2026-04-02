@@ -23,6 +23,7 @@ import {
     getItemIngredientIds,
     updateDiscoveryIngredients,
     setItemItemType,
+    setItemDisplayName,
     createUser,
     getUserByUsername,
     getUserById,
@@ -1728,6 +1729,33 @@ const server = http.createServer((req, res) => {
                 }
                 recipeIndex = buildRecipeIndex(getItemsMap(db));
                 sendJson(res, 200, { ok: true, id, type: type || null }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/items/display-name') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const id = typeof body.id === 'string' ? body.id.trim() : '';
+                const name = typeof body.name === 'string' ? body.name : '';
+                if (!id) return send(res, 400, 'id required', CORS_API);
+                const out = setItemDisplayName(db, id, name);
+                if (!out.ok) {
+                    const status =
+                        out.error && /not found/.test(out.error)
+                            ? 404
+                            : out.error && /required|too long/.test(out.error)
+                              ? 400
+                              : 409;
+                    return sendJson(res, status, { ok: false, error: out.error || 'update failed' }, CORS_API);
+                }
+                recipeIndex = buildRecipeIndex(getItemsMap(db));
+                sendJson(res, 200, { ok: true, id, name: String(name || '').trim() }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;

@@ -1310,6 +1310,30 @@ async function postDiscoveryUpdateItemType(id, type) {
 
 /**
  * @param {string} id
+ * @param {string} name
+ */
+async function postDiscoveryUpdateDisplayName(id, name) {
+    const r = await apiFetch('/api/items/display-name', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ id, name: String(name || '').trim() })
+    });
+    const t = await r.text();
+    if (!r.ok) {
+        let err = t;
+        try {
+            const j = JSON.parse(t);
+            if (j && typeof j.error === 'string') err = j.error;
+        } catch {
+            /* keep raw */
+        }
+        throw new Error(err || `${r.status}`);
+    }
+    return JSON.parse(t);
+}
+
+/**
+ * @param {string} id
  * @returns {Promise<boolean>} true if deleted
  */
 async function runDiscoveryDeleteFlow(id) {
@@ -1351,6 +1375,8 @@ function setDiscoveryEditModalOpen(open) {
             discoveryEditSearchTimer = 0;
         }
         if (discoveryEditItemTypeSelectEl) discoveryEditItemTypeSelectEl.value = '';
+        if (discoveryEditNameInputEl) discoveryEditNameInputEl.value = '';
+        if (discoveryEditItemIdEl) discoveryEditItemIdEl.textContent = '';
         resetDiscoveryEditImageUi();
     }
 }
@@ -1386,7 +1412,8 @@ function fillDiscoveryEditIngredientLabels(row) {
 function openDiscoveryEditModal(row) {
     discoveryEditTargetId = String(row.id || '').trim();
     discoveryEditSlot = '';
-    if (discoveryEditItemNameEl) discoveryEditItemNameEl.textContent = row.name || row.id;
+    if (discoveryEditItemIdEl) discoveryEditItemIdEl.textContent = discoveryEditTargetId;
+    if (discoveryEditNameInputEl) discoveryEditNameInputEl.value = String(row.name || row.id || '').trim();
     if (discoveryEditItemTypeSelectEl) {
         const t = typeof row.type === 'string' && row.type.trim() ? row.type.trim() : '';
         discoveryEditItemTypeSelectEl.value = t;
@@ -1530,8 +1557,8 @@ function renderDiscoveryEditAiCandidates(urls) {
 
 /** @returns {string} */
 function defaultDiscoveryEditImageQuery() {
-    const name = discoveryEditItemNameEl ? discoveryEditItemNameEl.textContent.trim() : '';
-    const base = name || discoveryEditTargetId || 'item';
+    const fromInput = discoveryEditNameInputEl ? discoveryEditNameInputEl.value.trim() : '';
+    const base = fromInput || discoveryEditTargetId || 'item';
     return `${base} isometric`;
 }
 
@@ -2297,7 +2324,11 @@ const globalDiscoveriesPrevBtn = document.getElementById('global-discoveries-pre
 const globalDiscoveriesNextBtn = document.getElementById('global-discoveries-next');
 const discoveryEditModalEl = document.getElementById('discovery-edit-modal');
 const discoveryEditCloseBtn = document.getElementById('discovery-edit-close');
-const discoveryEditItemNameEl = document.getElementById('discovery-edit-item-name');
+const discoveryEditNameInputEl = /** @type {HTMLInputElement | null} */ (
+    document.getElementById('discovery-edit-name-input')
+);
+const discoveryEditSaveNameBtn = document.getElementById('discovery-edit-save-name');
+const discoveryEditItemIdEl = document.getElementById('discovery-edit-item-id');
 const discoveryEditIngAEl = document.getElementById('discovery-edit-ing-a');
 const discoveryEditIngBEl = document.getElementById('discovery-edit-ing-b');
 const discoveryEditPickerEl = document.getElementById('discovery-edit-picker');
@@ -5907,6 +5938,37 @@ if (discoveryEditItemTypeSelectEl) {
             }
         } finally {
             discoveryEditItemTypeSelectEl.disabled = false;
+        }
+    });
+}
+if (discoveryEditSaveNameBtn && discoveryEditNameInputEl) {
+    discoveryEditSaveNameBtn.addEventListener('click', async () => {
+        const tid = discoveryEditTargetId;
+        if (!tid) return;
+        const name = discoveryEditNameInputEl.value.trim();
+        if (!name) {
+            alert('Enter a display name.');
+            return;
+        }
+        discoveryEditSaveNameBtn.setAttribute('disabled', 'disabled');
+        discoveryEditNameInputEl.disabled = true;
+        try {
+            const out = await postDiscoveryUpdateDisplayName(tid, name);
+            const saved = out && typeof out.name === 'string' ? out.name.trim() : name;
+            await reloadCatalogFromApi();
+            await refreshGlobalDiscoveriesFromApi();
+            const row = globalDiscoveriesRows.find((r) => r.id === tid);
+            if (row) row.name = saved;
+            if (discoveryEditNameInputEl) discoveryEditNameInputEl.value = saved;
+            renderGlobalDiscoveriesPage();
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            alert(msg.slice(0, 240));
+            const row = globalDiscoveriesRows.find((r) => r.id === tid);
+            if (row && discoveryEditNameInputEl) discoveryEditNameInputEl.value = row.name || tid;
+        } finally {
+            discoveryEditSaveNameBtn.removeAttribute('disabled');
+            discoveryEditNameInputEl.disabled = false;
         }
     });
 }
