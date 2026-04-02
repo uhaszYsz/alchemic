@@ -100,13 +100,18 @@ function migrateUsersLastSeenAt(db) {
     }
 }
 
-/** Starter factory corners use flint/plants; ensure rows exist on existing DBs. */
-function migrateStarterCornerResourceItems(db) {
+/**
+ * Base catalog starters (wood/stone/water/dirt/flint/plants). INSERT OR IGNORE so
+ * existing rows are untouched; missing ids are added (fixes DBs that only got flint+plants
+ * from an older migration that ran before the empty-DB seed block).
+ */
+function ensureSeedBaseItems(db) {
     const ins = db.prepare(
         'INSERT OR IGNORE INTO items (id, emoji, name, ingredient_a, ingredient_b) VALUES (@id, @emoji, @name, NULL, NULL)'
     );
-    ins.run({ id: 'flint', emoji: '🗿', name: 'Flint' });
-    ins.run({ id: 'plants', emoji: '🌿', name: 'Plants' });
+    for (const [id, emoji, name] of SEED) {
+        ins.run({ id, emoji, name });
+    }
     db.prepare("UPDATE items SET emoji = '🗿' WHERE id = 'flint'").run();
 }
 
@@ -183,19 +188,7 @@ export function openDb() {
     migrateItemsUniqueName(db);
     migrateDiscoveryProposalTables(db);
     migrateUsersLastSeenAt(db);
-    migrateStarterCornerResourceItems(db);
-    const n = db.prepare('SELECT COUNT(*) AS c FROM items').get().c;
-    if (n === 0) {
-        const ins = db.prepare(
-            'INSERT INTO items (id, emoji, name, ingredient_a, ingredient_b) VALUES (@id, @emoji, @name, NULL, NULL)'
-        );
-        const tx = db.transaction((rows) => {
-            for (const [id, emoji, name] of rows) {
-                ins.run({ id, emoji, name });
-            }
-        });
-        tx(SEED);
-    }
+    ensureSeedBaseItems(db);
     return db;
 }
 
