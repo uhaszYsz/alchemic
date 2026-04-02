@@ -4052,13 +4052,10 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     const placement = state.factory.placements[key];
     const gatherHubId = factoryFixedGatheringHubMaterialId(col, row) || '';
     const resId = factoryCellResourceId(col, row);
-    /** Deposit shown on empty cells: extractable ring uses resId; fixed hub corners use gatherHubId (same paint style as before). */
-    const depositId = resId || gatherHubId || '';
-    const depositIcon = depositId ? emojiForItemId(depositId) : '';
-    const depositImg = depositId ? factoryGetLoadedIconImage(depositId) : null;
     const resIcon = resId ? emojiForItemId(resId) : '';
     const resImg = resId ? factoryGetLoadedIconImage(resId) : null;
-    const hasRes = Boolean(depositId);
+    /** Green tint: extractable cells and/or fixed hub corners. */
+    const hasRes = Boolean(resId) || Boolean(gatherHubId);
     const carryId = state.factory.cellItems[key];
     const carryIcon = carryId ? emojiForItemId(carryId) : '';
     const carryImg = carryId ? factoryGetLoadedIconImage(carryId) : null;
@@ -4082,19 +4079,38 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
 
-    if (!placement && hasRes && (depositImg || depositIcon)) {
-        ctx.shadowColor = 'rgba(0,0,0,0.2)';
-        ctx.shadowBlur = 3 * sc;
-        ctx.shadowOffsetY = 1;
-        if (depositImg) {
-            const sz = Math.min(w, h) * 0.62;
-            ctx.drawImage(depositImg, midX - sz / 2, midY - sz / 2, sz, sz);
+    /* Fixed hub (non-buildable): medium icon centered. Extractable cells: small icon bottom-right (same as resource badge on buildings). */
+    if (!placement && gatherHubId && !resId) {
+        const hImg = factoryGetLoadedIconImage(gatherHubId);
+        const hIcon = emojiForItemId(gatherHubId);
+        if (hImg || hIcon) {
+            ctx.shadowColor = 'rgba(0,0,0,0.2)';
+            ctx.shadowBlur = 3 * sc;
+            ctx.shadowOffsetY = 1;
+            if (hImg) {
+                const sz = Math.min(w, h) * 0.62;
+                ctx.drawImage(hImg, midX - sz / 2, midY - sz / 2, sz, sz);
+            } else {
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.font = fs(22);
+                ctx.fillStyle = '#1c1917';
+                ctx.fillText(hIcon, midX, midY);
+            }
+            ctx.shadowBlur = 0;
+        }
+    } else if (!placement && resId && (resImg || resIcon)) {
+        ctx.shadowColor = 'rgba(0,0,0,0.25)';
+        ctx.shadowBlur = 2 * sc;
+        if (resImg) {
+            const sz = Math.max(8, 11 * sc);
+            ctx.drawImage(resImg, w - sz - 1, h - sz - 1, sz, sz);
         } else {
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.font = fs(22);
-            ctx.fillStyle = '#1c1917';
-            ctx.fillText(depositIcon, midX, midY);
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'bottom';
+            ctx.font = fs(11);
+            ctx.fillStyle = '#292524';
+            ctx.fillText(resIcon, w - 2, h - 1);
         }
         ctx.shadowBlur = 0;
     }
