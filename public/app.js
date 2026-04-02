@@ -4072,45 +4072,47 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     ctx.fillStyle = light ? '#e6e2d6' : '#d9d4c6';
     ctx.fillRect(0, 0, w, h);
     if (hasRes) {
-        ctx.fillStyle = 'rgba(52, 140, 72, 0.16)';
+        ctx.fillStyle =
+            gatherHubId && !resId ? 'rgba(22, 101, 52, 0.22)' : 'rgba(52, 140, 72, 0.16)';
         ctx.fillRect(0, 0, w, h);
     }
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.06)';
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
 
-    /* Fixed hub (non-buildable): medium icon centered. Extractable cells: small icon bottom-right (same as resource badge on buildings). */
+    /* Fixed hub: large icon centered. Buildable extractable cells: smaller icon centered. */
     if (!placement && gatherHubId && !resId) {
         const hImg = factoryGetLoadedIconImage(gatherHubId);
         const hIcon = emojiForItemId(gatherHubId);
         if (hImg || hIcon) {
-            ctx.shadowColor = 'rgba(0,0,0,0.2)';
-            ctx.shadowBlur = 3 * sc;
-            ctx.shadowOffsetY = 1;
+            ctx.shadowColor = 'rgba(0,0,0,0.28)';
+            ctx.shadowBlur = 5 * sc;
+            ctx.shadowOffsetY = 2;
             if (hImg) {
-                const sz = Math.min(w, h) * 0.62;
+                const sz = Math.min(w, h) * 0.88;
                 ctx.drawImage(hImg, midX - sz / 2, midY - sz / 2, sz, sz);
             } else {
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                ctx.font = fs(22);
-                ctx.fillStyle = '#1c1917';
+                ctx.font = fs(34);
+                ctx.fillStyle = '#14532d';
                 ctx.fillText(hIcon, midX, midY);
             }
             ctx.shadowBlur = 0;
         }
     } else if (!placement && resId && (resImg || resIcon)) {
-        ctx.shadowColor = 'rgba(0,0,0,0.25)';
-        ctx.shadowBlur = 2 * sc;
+        ctx.shadowColor = 'rgba(0,0,0,0.2)';
+        ctx.shadowBlur = 3 * sc;
+        ctx.shadowOffsetY = 1;
         if (resImg) {
-            const sz = Math.max(8, 11 * sc);
-            ctx.drawImage(resImg, w - sz - 1, h - sz - 1, sz, sz);
+            const sz = Math.min(w, h) * 0.44;
+            ctx.drawImage(resImg, midX - sz / 2, midY - sz / 2, sz, sz);
         } else {
-            ctx.textAlign = 'right';
-            ctx.textBaseline = 'bottom';
-            ctx.font = fs(11);
-            ctx.fillStyle = '#292524';
-            ctx.fillText(resIcon, w - 2, h - 1);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = fs(16);
+            ctx.fillStyle = '#1c1917';
+            ctx.fillText(resIcon, midX, midY);
         }
         ctx.shadowBlur = 0;
     }
