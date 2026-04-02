@@ -19,6 +19,9 @@ import {
     listDiscoveryProposalsByItem,
     voteOnDiscoveryProposal,
     listTopDiscoveriesByUser,
+    searchItemsByNameSubstring,
+    getItemIngredientIds,
+    updateDiscoveryIngredients,
     createUser,
     getUserByUsername,
     getUserById,
@@ -235,8 +238,8 @@ function factoryMaterialFromCornerSources(state, col, row) {
     const corners = [
         [center2Col - span2, center2Row - span2, 'wood'],
         [center2Col + span2, center2Row - span2, 'stone'],
-        [center2Col - span2, center2Row + span2, 'water'],
-        [center2Col + span2, center2Row + span2, 'dirt']
+        [center2Col - span2, center2Row + span2, 'flint'],
+        [center2Col + span2, center2Row + span2, 'plants']
     ];
     const found = [];
     for (const [cc, rr, id] of corners) {
@@ -246,7 +249,7 @@ function factoryMaterialFromCornerSources(state, col, row) {
     if (found.length === 0) return null;
     const uniq = [...new Set(found)];
     if (uniq.length === 1) return uniq[0];
-    const order = { wood: 0, stone: 1, water: 2, dirt: 3 };
+    const order = { wood: 0, stone: 1, flint: 2, plants: 3 };
     return uniq.sort((a, b) => order[a] - order[b])[0];
 }
 
@@ -1607,6 +1610,62 @@ const server = http.createServer((req, res) => {
                 recipeIndex = buildRecipeIndex(getItemsMap(db));
                 res.writeHead(204, CORS_API);
                 res.end();
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/items/search-names') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const q = typeof body.q === 'string' ? body.q.trim() : '';
+                const limRaw = Number(body.limit);
+                const limit = Number.isFinite(limRaw) ? limRaw : 40;
+                if (!q) return sendJson(res, 200, { items: [] }, CORS_API);
+                const items = searchItemsByNameSubstring(db, q, limit);
+                sendJson(res, 200, { items }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/items/update-ingredient') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const id = typeof body.id === 'string' ? body.id.trim() : '';
+                const slot = body.slot === 'b' ? 'b' : body.slot === 'a' ? 'a' : '';
+                const newIngredientId = typeof body.newIngredientId === 'string' ? body.newIngredientId.trim() : '';
+                if (!id || !slot || !newIngredientId) {
+                    return send(res, 400, 'id, slot (a|b), newIngredientId required', CORS_API);
+                }
+                const cur = getItemIngredientIds(db, id);
+                if (!cur || !cur.ingredient_a || !cur.ingredient_b) {
+                    return send(res, 409, 'item has no craft recipe to edit', CORS_API);
+                }
+                let newA = cur.ingredient_a;
+                let newB = cur.ingredient_b;
+                if (slot === 'a') newA = newIngredientId;
+                else newB = newIngredientId;
+                const out = updateDiscoveryIngredients(db, id, newA, newB);
+                if (!out.ok) {
+                    const status = out.error && /not found/.test(out.error) ? 404 : 409;
+                    return sendJson(
+                        res,
+                        status,
+                        { ok: false, error: out.error || 'update failed', otherId: out.otherId },
+                        CORS_API
+                    );
+                }
+                recipeIndex = buildRecipeIndex(getItemsMap(db));
+                sendJson(res, 200, { ok: true, id, ingredient_a: newA, ingredient_b: newB }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;

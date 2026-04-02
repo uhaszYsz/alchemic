@@ -42,7 +42,7 @@ const state = {
         /** @type {null | 'transporter' | 'extractor' | 'combiner' | 'storage' | 'sorter' | 'bridge'} */
         selectedBuilding: null,
         /**
-         * Optional resource deposits on inner cells (item id, e.g. wood, water).
+         * Optional resource deposits on inner cells (item id, e.g. wood, flint).
          * Used for extractor rules and future mechanics. Corners are not stored here.
          * @type {Record<string, string>}
          */
@@ -111,6 +111,11 @@ let globalDiscoveriesRows = [];
 let globalDiscoveriesPage = 1;
 let globalDiscoveriesSort = 'datetime';
 let globalDiscoveriesExpandedId = '';
+/** @type {string} */
+let discoveryEditTargetId = '';
+/** @type {'' | 'a' | 'b'} */
+let discoveryEditSlot = '';
+let discoveryEditSearchTimer = 0;
 let dbViewerTables = [];
 let dbViewerSelectedTable = '';
 let dbViewerPrimaryKey = [];
@@ -1232,6 +1237,169 @@ async function postDiscoveryDelete(id) {
     if (!r.ok) throw new Error(t || `${r.status}`);
 }
 
+/**
+ * @param {string} q
+ * @returns {Promise<{ id: string, emoji: string, name: string }[]>}
+ */
+async function postDiscoverySearchNames(q) {
+    const r = await apiFetch('/api/items/search-names', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ q: String(q || '').trim(), limit: 50 })
+    });
+    const t = await r.text();
+    if (!r.ok) throw new Error(t || `${r.status}`);
+    const out = JSON.parse(t);
+    return Array.isArray(out && out.items) ? out.items : [];
+}
+
+/**
+ * @param {string} id
+ * @param {'a' | 'b'} slot
+ * @param {string} newIngredientId
+ */
+async function postDiscoveryUpdateIngredient(id, slot, newIngredientId) {
+    const r = await apiFetch('/api/items/update-ingredient', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ id, slot, newIngredientId })
+    });
+    const t = await r.text();
+    if (!r.ok) {
+        let err = t;
+        try {
+            const j = JSON.parse(t);
+            if (j && typeof j.error === 'string') err = j.error;
+        } catch {
+            /* keep raw */
+        }
+        throw new Error(err || `${r.status}`);
+    }
+    return JSON.parse(t);
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<boolean>} true if deleted
+ */
+async function runDiscoveryDeleteFlow(id) {
+    const check = await postDiscoveryDeleteCheck(id);
+    const deps = Array.isArray(check.dependents) ? check.dependents : [];
+    if (deps.length > 0) {
+        const preview = deps
+            .slice(0, 12)
+            .map((d) => `${d.emoji || '·'} ${d.name || d.id} (${d.id})`)
+            .join('\n');
+        const suffix = deps.length > 12 ? `\n...and ${deps.length - 12} more` : '';
+        alert(`Cannot delete "${id}" yet.\nIt is needed to craft:\n${preview}${suffix}`);
+        return false;
+    }
+    const ok = confirm(`Delete discovery "${id}" from database?`);
+    if (!ok) return false;
+    await postDiscoveryDelete(id);
+    await refreshGlobalDiscoveriesFromApi();
+    await reloadCatalogFromApi();
+    if (state.pendingCombination && state.pendingCombination.resultId === id) {
+        state.pendingCombination.resultId = '';
+    }
+    state.activeElements = state.activeElements.filter((el) => String(el.id || '') !== id);
+    renderCanvas();
+    return true;
+}
+
+function setDiscoveryEditModalOpen(open) {
+    if (!discoveryEditModalEl) return;
+    discoveryEditModalEl.classList.toggle('hidden', !open);
+    if (!open) {
+        discoveryEditTargetId = '';
+        discoveryEditSlot = '';
+        hideDiscoveryEditPicker();
+        if (discoveryEditSearchInputEl) discoveryEditSearchInputEl.value = '';
+        if (discoveryEditSearchResultsEl) discoveryEditSearchResultsEl.innerHTML = '';
+        if (discoveryEditSearchTimer) {
+            clearTimeout(discoveryEditSearchTimer);
+            discoveryEditSearchTimer = 0;
+        }
+    }
+}
+
+function hideDiscoveryEditPicker() {
+    if (discoveryEditPickerEl) discoveryEditPickerEl.classList.add('hidden');
+    discoveryEditSlot = '';
+    if (discoveryEditSearchInputEl) discoveryEditSearchInputEl.value = '';
+    if (discoveryEditSearchResultsEl) discoveryEditSearchResultsEl.innerHTML = '';
+}
+
+/**
+ * @param {{ id: string, name: string, emoji?: string, ingredientA?: string, ingredientB?: string, ingredientAText?: string, ingredientBText?: string, ingredientAEmoji?: string, ingredientBEmoji?: string }} row
+ */
+function fillDiscoveryEditIngredientLabels(row) {
+    if (!discoveryEditIngAEl || !discoveryEditIngBEl) return;
+    if (row.ingredientA && row.ingredientB) {
+        discoveryEditIngAEl.textContent = `${row.ingredientAEmoji || '·'} ${row.ingredientAText || row.ingredientA} — ${row.ingredientA}`;
+        discoveryEditIngBEl.textContent = `${row.ingredientBEmoji || '·'} ${row.ingredientBText || row.ingredientB} — ${row.ingredientB}`;
+        discoveryEditIngAEl.disabled = false;
+        discoveryEditIngBEl.disabled = false;
+    } else {
+        discoveryEditIngAEl.textContent = '— (no craft recipe)';
+        discoveryEditIngBEl.textContent = '— (no craft recipe)';
+        discoveryEditIngAEl.disabled = true;
+        discoveryEditIngBEl.disabled = true;
+    }
+}
+
+/**
+ * @param {{ id: string, name: string, emoji?: string, ingredientA?: string, ingredientB?: string, ingredientAText?: string, ingredientBText?: string, ingredientAEmoji?: string, ingredientBEmoji?: string }} row
+ */
+function openDiscoveryEditModal(row) {
+    discoveryEditTargetId = String(row.id || '').trim();
+    discoveryEditSlot = '';
+    if (discoveryEditItemNameEl) discoveryEditItemNameEl.textContent = row.name || row.id;
+    fillDiscoveryEditIngredientLabels(row);
+    hideDiscoveryEditPicker();
+    setDiscoveryEditModalOpen(true);
+}
+
+async function runDiscoveryEditSearch() {
+    if (!discoveryEditSearchInputEl || !discoveryEditSearchResultsEl || !discoveryEditSlot) return;
+    const q = discoveryEditSearchInputEl.value.trim();
+    discoveryEditSearchResultsEl.innerHTML = '';
+    if (!q) return;
+    try {
+        const items = await postDiscoverySearchNames(q);
+        if (!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'text-xs text-slate-500 px-1 py-1';
+            empty.textContent = 'No matches.';
+            discoveryEditSearchResultsEl.appendChild(empty);
+            return;
+        }
+        items.forEach((it) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className =
+                'w-full text-left px-2 py-1.5 rounded-md bg-slate-800/80 border border-slate-700 text-sm text-slate-100 hover:bg-slate-700/80 touch-manipulation';
+            b.setAttribute('data-discovery-edit-pick-id', it.id);
+            b.textContent = `${it.emoji || '·'} ${it.name} (${it.id})`;
+            discoveryEditSearchResultsEl.appendChild(b);
+        });
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        const err = document.createElement('div');
+        err.className = 'text-xs text-red-400 px-1 py-1';
+        err.textContent = msg.slice(0, 200);
+        discoveryEditSearchResultsEl.appendChild(err);
+    }
+}
+
+function scheduleDiscoveryEditSearch() {
+    if (discoveryEditSearchTimer) clearTimeout(discoveryEditSearchTimer);
+    discoveryEditSearchTimer = window.setTimeout(() => {
+        discoveryEditSearchTimer = 0;
+        void runDiscoveryEditSearch();
+    }, 220);
+}
+
 /** @returns {Promise<string[]>} */
 async function fetchDbTables() {
     const r = await apiFetch('/api/db/tables', { method: 'GET' });
@@ -1458,13 +1626,13 @@ function buildGlobalDiscoveryRowElement(row, depth) {
 
     const right = document.createElement('div');
     right.className = 'ml-2 shrink-0 flex items-center gap-1.5';
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'vote-pill vote-pill--down';
-    deleteBtn.setAttribute('data-discovery-delete-btn', '1');
-    deleteBtn.setAttribute('data-id', row.id);
-    deleteBtn.textContent = 'Delete';
-    right.appendChild(deleteBtn);
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'vote-pill vote-pill--up';
+    editBtn.setAttribute('data-discovery-edit-btn', '1');
+    editBtn.setAttribute('data-id', row.id);
+    editBtn.textContent = 'Edit';
+    right.appendChild(editBtn);
     const upBtn = document.createElement('button');
     upBtn.type = 'button';
     upBtn.className = 'vote-pill vote-pill--up';
@@ -1848,6 +2016,16 @@ const globalDiscoveriesListEl = document.getElementById('global-discoveries-list
 const globalDiscoveriesSortEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('global-discoveries-sort'));
 const globalDiscoveriesPrevBtn = document.getElementById('global-discoveries-prev');
 const globalDiscoveriesNextBtn = document.getElementById('global-discoveries-next');
+const discoveryEditModalEl = document.getElementById('discovery-edit-modal');
+const discoveryEditCloseBtn = document.getElementById('discovery-edit-close');
+const discoveryEditItemNameEl = document.getElementById('discovery-edit-item-name');
+const discoveryEditIngAEl = document.getElementById('discovery-edit-ing-a');
+const discoveryEditIngBEl = document.getElementById('discovery-edit-ing-b');
+const discoveryEditPickerEl = document.getElementById('discovery-edit-picker');
+const discoveryEditPickerLabelEl = document.getElementById('discovery-edit-picker-label');
+const discoveryEditSearchInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-edit-search-input'));
+const discoveryEditSearchResultsEl = document.getElementById('discovery-edit-search-results');
+const discoveryEditDeleteBtn = document.getElementById('discovery-edit-delete');
 const dbViewerModalEl = document.getElementById('db-viewer-modal');
 const closeDbViewerBtn = document.getElementById('close-db-viewer');
 const dbViewerTableSelectEl = /** @type {HTMLSelectElement | null} */ (document.getElementById('db-viewer-table-select'));
@@ -3299,9 +3477,9 @@ function factoryCanSpeedUpgrade() {
 }
 
 /**
- * Material on a cell from the four corner sources (NW wood, NE stone, SW water, SE dirt).
+ * Material on a cell from the four corner sources (NW wood, NE stone, SW flint, SE plants).
  * A cell counts if it is that corner or one step away orthogonally (Manhattan distance 1); no diagonals-only tiles.
- * If a cell is in range of two sources (small grids), pick wood, stone, water, dirt (fixed priority).
+ * If a cell is in range of two sources (small grids), pick wood, stone, flint, plants (fixed priority).
  */
 function factoryMaterialFromCornerSources(col, row) {
     const center2Col = factoryGridCols() - 1;
@@ -3312,8 +3490,8 @@ function factoryMaterialFromCornerSources(col, row) {
     const corners = [
         [center2Col - span2, center2Row - span2, 'wood'],
         [center2Col + span2, center2Row - span2, 'stone'],
-        [center2Col - span2, center2Row + span2, 'water'],
-        [center2Col + span2, center2Row + span2, 'dirt']
+        [center2Col - span2, center2Row + span2, 'flint'],
+        [center2Col + span2, center2Row + span2, 'plants']
     ];
     const found = [];
     for (const [cc2, cr2, id] of corners) {
@@ -3323,7 +3501,7 @@ function factoryMaterialFromCornerSources(col, row) {
     if (found.length === 0) return null;
     const uniq = [...new Set(found)];
     if (uniq.length === 1) return uniq[0];
-    const order = { wood: 0, stone: 1, water: 2, dirt: 3 };
+    const order = { wood: 0, stone: 1, flint: 2, plants: 3 };
     return uniq.sort((a, b) => order[a] - order[b])[0];
 }
 
@@ -3874,9 +4052,11 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.shadowBlur = 0;
     }
 
-    if (placement === 'transporter') {
-        const tDir = factoryTransporterDir(key);
-        const angle = (tDir * Math.PI) / 2;
+    if (placement === 'transporter' || placement === 'bridge') {
+        const beltDir = placement === 'bridge' ? factoryBridgeDir(key) : factoryTransporterDir(key);
+        const angle = (beltDir * Math.PI) / 2;
+        const accentColor = placement === 'bridge' ? '#0284c7' : '#ca8a04';
+        const arrowColor = placement === 'bridge' ? '#67e8f9' : '#fde047';
         ctx.save();
         ctx.globalAlpha = 0.5;
         ctx.translate(midX, midY);
@@ -3888,7 +4068,7 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.strokeStyle = '#0f172a';
         ctx.lineWidth = Math.max(1, sc);
         ctx.strokeRect(-rw, -rh, rw * 2, rh * 2);
-        ctx.fillStyle = '#ca8a04';
+        ctx.fillStyle = accentColor;
         ctx.fillRect(-rw + 2 * sc, -rh * 0.22, rw * 2 - 4 * sc, rh * 0.44);
         const rollerY = [-rh * 0.55, 0, rh * 0.55];
         for (const ry of rollerY) {
@@ -3900,7 +4080,7 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
             ctx.lineWidth = 0.5;
             ctx.stroke();
         }
-        ctx.fillStyle = '#fde047';
+        ctx.fillStyle = arrowColor;
         ctx.beginPath();
         ctx.moveTo(0, -rh * 0.85);
         ctx.lineTo(3.5 * sc, -rh * 0.35);
@@ -3923,57 +4103,38 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.restore();
 
         // Conflict input cursor arrow (0 right, 1 up, 2 left, 3 down) if defined.
-        const ttCursor =
-            state.factory &&
-            state.factory._ttInputCursor &&
-            typeof state.factory._ttInputCursor === 'object' &&
-            Number.isFinite(Number(state.factory._ttInputCursor[key]))
-                ? ((Number(state.factory._ttInputCursor[key]) | 0) + 4) % 4
-                : null;
-        if (ttCursor !== null) {
-            const angleByInputDir = {
-                0: 0,
-                1: -Math.PI / 2,
-                2: Math.PI,
-                3: Math.PI / 2
-            };
-            ctx.save();
-            ctx.translate(midX, Math.max(5 * sc, h * 0.18));
-            ctx.rotate(angleByInputDir[ttCursor]);
-            ctx.fillStyle = '#7dd3fc';
-            ctx.strokeStyle = '#0f172a';
-            ctx.lineWidth = Math.max(0.8, sc * 0.9);
-            ctx.beginPath();
-            ctx.moveTo(5.4 * sc, 0);
-            ctx.lineTo(-2.6 * sc, -3.4 * sc);
-            ctx.lineTo(-2.6 * sc, 3.4 * sc);
-            ctx.closePath();
-            ctx.fill();
-            ctx.stroke();
-            ctx.restore();
+        // Bridge reuses transporter look, but this cursor applies to transporter conflict routing only.
+        if (placement === 'transporter') {
+            const ttCursor =
+                state.factory &&
+                state.factory._ttInputCursor &&
+                typeof state.factory._ttInputCursor === 'object' &&
+                Number.isFinite(Number(state.factory._ttInputCursor[key]))
+                    ? ((Number(state.factory._ttInputCursor[key]) | 0) + 4) % 4
+                    : null;
+            if (ttCursor !== null) {
+                const angleByInputDir = {
+                    0: 0,
+                    1: -Math.PI / 2,
+                    2: Math.PI,
+                    3: Math.PI / 2
+                };
+                ctx.save();
+                ctx.translate(midX, Math.max(5 * sc, h * 0.18));
+                ctx.rotate(angleByInputDir[ttCursor]);
+                ctx.fillStyle = '#7dd3fc';
+                ctx.strokeStyle = '#0f172a';
+                ctx.lineWidth = Math.max(0.8, sc * 0.9);
+                ctx.beginPath();
+                ctx.moveTo(5.4 * sc, 0);
+                ctx.lineTo(-2.6 * sc, -3.4 * sc);
+                ctx.lineTo(-2.6 * sc, 3.4 * sc);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+                ctx.restore();
+            }
         }
-    } else if (placement === 'bridge') {
-        const bDir = factoryBridgeDir(key);
-        const angle = (bDir * Math.PI) / 2;
-        const bodyW = w * 0.62;
-        const bodyH = h * 0.34;
-        ctx.save();
-        ctx.translate(midX, midY);
-        ctx.rotate(angle);
-        ctx.fillStyle = '#1e293b';
-        ctx.strokeStyle = '#334155';
-        ctx.lineWidth = Math.max(1, sc);
-        ctx.fillRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
-        ctx.strokeRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
-        ctx.fillStyle = '#22d3ee';
-        ctx.fillRect(-bodyW * 0.4, -bodyH * 0.1, bodyW * 0.8, bodyH * 0.2);
-        ctx.beginPath();
-        ctx.moveTo(0, -bodyH * 0.95);
-        ctx.lineTo(4.6 * sc, -bodyH * 0.35);
-        ctx.lineTo(-4.6 * sc, -bodyH * 0.35);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
     } else if (placement === 'sorter') {
         const sDir = factorySorterDir(key);
         const angle = (sDir * Math.PI) / 2;
@@ -5164,44 +5325,13 @@ if (globalDiscoveriesListEl) {
     globalDiscoveriesListEl.addEventListener('click', async (ev) => {
         const t = ev.target;
         if (!t || !(t instanceof Element)) return;
-        const deleteBtn = t.closest('[data-discovery-delete-btn="1"]');
-        if (deleteBtn) {
-            const id = String(deleteBtn.getAttribute('data-id') || '').trim();
+        const editBtn = t.closest('[data-discovery-edit-btn="1"]');
+        if (editBtn) {
+            const id = String(editBtn.getAttribute('data-id') || '').trim();
             if (!id) return;
-            deleteBtn.setAttribute('disabled', 'disabled');
-            try {
-                const check = await postDiscoveryDeleteCheck(id);
-                const deps = Array.isArray(check.dependents) ? check.dependents : [];
-                if (deps.length > 0) {
-                    const preview = deps
-                        .slice(0, 12)
-                        .map((d) => `${d.emoji || '·'} ${d.name || d.id} (${d.id})`)
-                        .join('\n');
-                    const suffix = deps.length > 12 ? `\n...and ${deps.length - 12} more` : '';
-                    alert(
-                        `Cannot delete "${id}" yet.\nIt is needed to craft:\n${preview}${suffix}`
-                    );
-                    deleteBtn.removeAttribute('disabled');
-                    return;
-                }
-                const ok = confirm(`Delete discovery "${id}" from database?`);
-                if (!ok) {
-                    deleteBtn.removeAttribute('disabled');
-                    return;
-                }
-                await postDiscoveryDelete(id);
-                await refreshGlobalDiscoveriesFromApi();
-                await reloadCatalogFromApi();
-                if (state.pendingCombination && state.pendingCombination.resultId === id) {
-                    state.pendingCombination.resultId = '';
-                }
-                state.activeElements = state.activeElements.filter((el) => String(el.id || '') !== id);
-                renderCanvas();
-            } catch (e) {
-                const msg = e && typeof e.message === 'string' ? e.message : String(e);
-                alert(msg.slice(0, 240));
-                deleteBtn.removeAttribute('disabled');
-            }
+            const row = globalDiscoveriesRows.find((r) => r.id === id);
+            if (!row) return;
+            openDiscoveryEditModal(row);
             return;
         }
         const voteBtn = t.closest('[data-discovery-vote-btn="1"]');
@@ -5291,6 +5421,86 @@ if (globalDiscoveriesListEl) {
                 console.warn('refreshDiscoveryProposalsForItem', e);
             }
             renderGlobalDiscoveriesPage();
+        }
+    });
+}
+
+if (discoveryEditCloseBtn) {
+    discoveryEditCloseBtn.addEventListener('click', () => setDiscoveryEditModalOpen(false));
+}
+if (discoveryEditModalEl) {
+    discoveryEditModalEl.addEventListener('click', (e) => {
+        if (e.target === discoveryEditModalEl) setDiscoveryEditModalOpen(false);
+    });
+}
+if (discoveryEditIngAEl) {
+    discoveryEditIngAEl.addEventListener('click', () => {
+        if (!discoveryEditTargetId || discoveryEditIngAEl.disabled) return;
+        discoveryEditSlot = 'a';
+        if (discoveryEditPickerEl) discoveryEditPickerEl.classList.remove('hidden');
+        if (discoveryEditPickerLabelEl) discoveryEditPickerLabelEl.textContent = 'Replace ingredient A';
+        if (discoveryEditSearchInputEl) {
+            discoveryEditSearchInputEl.value = '';
+            discoveryEditSearchInputEl.focus();
+        }
+        if (discoveryEditSearchResultsEl) discoveryEditSearchResultsEl.innerHTML = '';
+    });
+}
+if (discoveryEditIngBEl) {
+    discoveryEditIngBEl.addEventListener('click', () => {
+        if (!discoveryEditTargetId || discoveryEditIngBEl.disabled) return;
+        discoveryEditSlot = 'b';
+        if (discoveryEditPickerEl) discoveryEditPickerEl.classList.remove('hidden');
+        if (discoveryEditPickerLabelEl) discoveryEditPickerLabelEl.textContent = 'Replace ingredient B';
+        if (discoveryEditSearchInputEl) {
+            discoveryEditSearchInputEl.value = '';
+            discoveryEditSearchInputEl.focus();
+        }
+        if (discoveryEditSearchResultsEl) discoveryEditSearchResultsEl.innerHTML = '';
+    });
+}
+if (discoveryEditSearchInputEl) {
+    discoveryEditSearchInputEl.addEventListener('input', () => scheduleDiscoveryEditSearch());
+}
+if (discoveryEditSearchResultsEl) {
+    discoveryEditSearchResultsEl.addEventListener('click', async (ev) => {
+        const t = ev.target;
+        if (!t || !(t instanceof Element)) return;
+        const pick = t.closest('[data-discovery-edit-pick-id]');
+        if (!pick) return;
+        const pickId = String(pick.getAttribute('data-discovery-edit-pick-id') || '').trim();
+        const tid = discoveryEditTargetId;
+        const slot = discoveryEditSlot;
+        if (!tid || (slot !== 'a' && slot !== 'b') || !pickId) return;
+        pick.setAttribute('disabled', 'disabled');
+        try {
+            await postDiscoveryUpdateIngredient(tid, /** @type {'a' | 'b'} */ (slot), pickId);
+            await refreshGlobalDiscoveriesFromApi();
+            await reloadCatalogFromApi();
+            const row = globalDiscoveriesRows.find((r) => r.id === tid);
+            if (row) fillDiscoveryEditIngredientLabels(row);
+            hideDiscoveryEditPicker();
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            alert(msg.slice(0, 240));
+        } finally {
+            pick.removeAttribute('disabled');
+        }
+    });
+}
+if (discoveryEditDeleteBtn) {
+    discoveryEditDeleteBtn.addEventListener('click', async () => {
+        const id = discoveryEditTargetId;
+        if (!id) return;
+        discoveryEditDeleteBtn.setAttribute('disabled', 'disabled');
+        try {
+            const ok = await runDiscoveryDeleteFlow(id);
+            if (ok) setDiscoveryEditModalOpen(false);
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            alert(msg.slice(0, 240));
+        } finally {
+            discoveryEditDeleteBtn.removeAttribute('disabled');
         }
     });
 }

@@ -511,6 +511,36 @@
         </div>
     </div>
 
+    <div id="discovery-edit-modal" class="hidden fixed inset-0 bg-black/85 flex items-center justify-center z-[60] backdrop-blur-sm px-3 py-3 overflow-y-auto" role="dialog" aria-modal="true">
+        <div class="bg-slate-800 rounded-2xl border border-slate-600 shadow-2xl w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col">
+            <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">
+                <div>
+                    <h2 class="text-sm font-bold text-slate-200">Edit discovery</h2>
+                    <p class="text-[10px] text-amber-500/90 mt-0.5">Temporary debug — replace ingredients</p>
+                </div>
+                <button type="button" id="discovery-edit-close" class="min-h-[44px] px-3 py-2 rounded-xl bg-slate-800 border border-slate-600 text-slate-200 text-sm font-semibold hover:bg-slate-700 transition touch-manipulation">
+                    Close
+                </button>
+            </div>
+            <div class="px-4 py-3 space-y-3 overflow-y-auto flex-1 min-h-0">
+                <div id="discovery-edit-item-name" class="text-sm text-slate-100 font-medium break-words"></div>
+                <div class="space-y-2">
+                    <div class="text-xs text-slate-400">Ingredients (tap to replace)</div>
+                    <button type="button" id="discovery-edit-ing-a" class="w-full text-left min-h-[44px] px-3 py-2 rounded-lg bg-slate-900/70 border border-slate-600 text-slate-200 text-sm hover:bg-slate-900 transition touch-manipulation disabled:opacity-40 disabled:pointer-events-none"></button>
+                    <button type="button" id="discovery-edit-ing-b" class="w-full text-left min-h-[44px] px-3 py-2 rounded-lg bg-slate-900/70 border border-slate-600 text-slate-200 text-sm hover:bg-slate-900 transition touch-manipulation disabled:opacity-40 disabled:pointer-events-none"></button>
+                </div>
+                <div id="discovery-edit-picker" class="hidden border border-slate-600 rounded-lg p-2 bg-slate-950/50">
+                    <div class="text-xs text-slate-400 mb-1.5" id="discovery-edit-picker-label"></div>
+                    <input type="search" id="discovery-edit-search-input" autocomplete="off" class="w-full min-h-[40px] px-2 py-1.5 rounded-md bg-slate-900 border border-slate-600 text-sm text-slate-100 placeholder:text-slate-500" placeholder="Search item names…" />
+                    <div id="discovery-edit-search-results" class="mt-2 max-h-44 overflow-y-auto space-y-1"></div>
+                </div>
+                <button type="button" id="discovery-edit-delete" class="w-full min-h-[44px] px-3 py-2 rounded-lg vote-pill vote-pill--down text-sm font-semibold">
+                    Delete from database
+                </button>
+            </div>
+        </div>
+    </div>
+
     <div id="db-viewer-modal" class="hidden fixed inset-0 bg-black/85 backdrop-blur-sm" role="dialog" aria-modal="true" style="z-index: 9999;">
         <div class="fixed inset-0 bg-slate-800 overflow-hidden flex flex-col" style="inset: 0;">
             <div class="px-4 py-3 bg-slate-900/60 border-b border-slate-700 flex items-center justify-between gap-3">

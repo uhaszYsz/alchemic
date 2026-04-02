@@ -9,7 +9,9 @@ const SEED = [
     ['wood', '🪵', 'Wood'],
     ['stone', '🪨', 'Stone'],
     ['water', '💧', 'Water'],
-    ['dirt', '🟫', 'Dirt']
+    ['dirt', '🟫', 'Dirt'],
+    ['flint', '🗿', 'Flint'],
+    ['plants', '🌿', 'Plants']
 ];
 
 function migrateItemsIconPath(db) {
@@ -98,6 +100,16 @@ function migrateUsersLastSeenAt(db) {
     }
 }
 
+/** Starter factory corners use flint/plants; ensure rows exist on existing DBs. */
+function migrateStarterCornerResourceItems(db) {
+    const ins = db.prepare(
+        'INSERT OR IGNORE INTO items (id, emoji, name, ingredient_a, ingredient_b) VALUES (@id, @emoji, @name, NULL, NULL)'
+    );
+    ins.run({ id: 'flint', emoji: '🗿', name: 'Flint' });
+    ins.run({ id: 'plants', emoji: '🌿', name: 'Plants' });
+    db.prepare("UPDATE items SET emoji = '🗿' WHERE id = 'flint'").run();
+}
+
 export function openDb() {
     const db = new Database(dbPath);
     db.pragma('journal_mode = WAL');
@@ -171,6 +183,7 @@ export function openDb() {
     migrateItemsUniqueName(db);
     migrateDiscoveryProposalTables(db);
     migrateUsersLastSeenAt(db);
+    migrateStarterCornerResourceItems(db);
     const n = db.prepare('SELECT COUNT(*) AS c FROM items').get().c;
     if (n === 0) {
         const ins = db.prepare(
@@ -293,6 +306,115 @@ export function findItemByName(db, name) {
         .prepare('SELECT id FROM items WHERE name = ? COLLATE NOCASE LIMIT 1')
         .get(normalized);
     return row || null;
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} id
+ * @returns {boolean}
+ */
+export function itemIdExists(db, id) {
+    const row = db.prepare('SELECT 1 FROM items WHERE id = ? LIMIT 1').get(String(id || '').trim());
+    return !!row;
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} query
+ * @param {number} limit
+ * @returns {{ id: string, emoji: string, name: string }[]}
+ */
+export function searchItemsByNameSubstring(db, query, limit = 40) {
+    const q = String(query || '').trim();
+    if (!q) return [];
+    const lim = Math.max(1, Math.min(100, Number(limit) | 0 || 40));
+    const esc = q.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const pat = `%${esc}%`;
+    const rows = db
+        .prepare(
+            `SELECT id, emoji, name FROM items
+             WHERE name LIKE @pat ESCAPE '\\'
+             ORDER BY name COLLATE NOCASE
+             LIMIT @lim`
+        )
+        .all({ pat, lim });
+    return rows.map((r) => ({
+        id: String(r.id || ''),
+        emoji: String(r.emoji || '✨'),
+        name: String(r.name || '')
+    }));
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @returns {{ ingredient_a: string, ingredient_b: string } | null}
+ */
+export function getItemIngredientIds(db, itemId) {
+    const row = db
+        .prepare('SELECT ingredient_a, ingredient_b FROM items WHERE id = ?')
+        .get(String(itemId || '').trim());
+    if (!row) return null;
+    return {
+        ingredient_a: String(row.ingredient_a || '').trim(),
+        ingredient_b: String(row.ingredient_b || '').trim()
+    };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} ingredientA
+ * @param {string} ingredientB
+ * @param {string} excludeItemId
+ * @returns {string | null} other item id if collision
+ */
+export function findOtherItemWithSameRecipe(db, ingredientA, ingredientB, excludeItemId) {
+    const a = String(ingredientA || '').trim();
+    const b = String(ingredientB || '').trim();
+    const ex = String(excludeItemId || '').trim();
+    if (!a || !b || !ex) return null;
+    const row = db
+        .prepare(
+            `SELECT id FROM items
+             WHERE id != @ex
+               AND TRIM(COALESCE(ingredient_a, '')) != ''
+               AND TRIM(COALESCE(ingredient_b, '')) != ''
+               AND (
+                 (ingredient_a = @a AND ingredient_b = @b)
+                 OR (ingredient_a = @b AND ingredient_b = @a)
+               )
+             LIMIT 1`
+        )
+        .get({ ex, a, b });
+    return row && row.id != null ? String(row.id) : null;
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @param {string} ingredient_a
+ * @param {string} ingredient_b
+ * @returns {{ ok: boolean, error?: string, otherId?: string }}
+ */
+export function updateDiscoveryIngredients(db, itemId, ingredient_a, ingredient_b) {
+    const id = String(itemId || '').trim();
+    const a = String(ingredient_a || '').trim();
+    const b = String(ingredient_b || '').trim();
+    if (!id || !a || !b) return { ok: false, error: 'missing id or ingredients' };
+    if (!itemIdExists(db, id)) return { ok: false, error: 'item not found' };
+    if (!itemIdExists(db, a) || !itemIdExists(db, b)) return { ok: false, error: 'ingredient item not found' };
+    const curRow = db.prepare('SELECT ingredient_a, ingredient_b FROM items WHERE id = ?').get(id);
+    if (
+        curRow &&
+        String(curRow.ingredient_a || '').trim() === a &&
+        String(curRow.ingredient_b || '').trim() === b
+    ) {
+        return { ok: true };
+    }
+    const other = findOtherItemWithSameRecipe(db, a, b, id);
+    if (other) return { ok: false, error: 'another item already uses this recipe pair', otherId: other };
+    const out = db.prepare('UPDATE items SET ingredient_a = @a, ingredient_b = @b WHERE id = @id').run({ id, a, b });
+    return out.changes > 0 ? { ok: true } : { ok: false, error: 'update failed' };
 }
 
 /**
