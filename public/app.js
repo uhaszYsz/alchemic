@@ -105,7 +105,7 @@ const state = {
 /** Base catalog from DB (merged with live combo index for tier calculation). */
 let cachedBaseItemsMap = null;
 const GLOBAL_DISCOVERIES_PER_PAGE = 50;
-/** @type {{ id: string, emoji: string, name: string, nameColor?: string, discoveredAt?: string, ingredientA?: string, ingredientB?: string, ingredientAText?: string, ingredientBText?: string, upvotes?: number, downvotes?: number }[]} */
+/** @type {{ id: string, emoji: string, name: string, nameColor?: string, type?: string, discoveredAt?: string, ingredientA?: string, ingredientB?: string, ingredientAText?: string, ingredientBText?: string, upvotes?: number, downvotes?: number }[]} */
 let globalDiscoveriesRows = [];
 let globalDiscoveriesPage = 1;
 let globalDiscoveriesSort = 'datetime';
@@ -1135,7 +1135,7 @@ async function loadGameData() {
 }
 
 /**
- * @param {Record<string, { emoji?: string, name?: string, nameColor?: string, discoveredAt?: string, discoveredByUsername?: string, iconPath?: string, iconSizeBytes?: number, a?: string, b?: string, upvotes?: number, downvotes?: number }>} items
+ * @param {Record<string, { emoji?: string, name?: string, nameColor?: string, type?: string, discoveredAt?: string, discoveredByUsername?: string, iconPath?: string, iconSizeBytes?: number, a?: string, b?: string, upvotes?: number, downvotes?: number }>} items
  */
 function buildGlobalDiscoveriesRows(items) {
     const rows = [];
@@ -1144,6 +1144,9 @@ function buildGlobalDiscoveriesRows(items) {
         const row = { id, name: def.name, emoji: def.emoji };
         const nameColor = normalizeItemNameColor(def.nameColor);
         if (nameColor) row.nameColor = nameColor;
+        if (typeof def.type === 'string' && def.type.trim()) {
+            row.type = def.type.trim();
+        }
         if (typeof def.a === 'string' && def.a && typeof def.b === 'string' && def.b) {
             row.ingredientA = def.a;
             row.ingredientB = def.b;
@@ -1283,6 +1286,30 @@ async function postDiscoveryUpdateIngredient(id, slot, newIngredientId) {
 
 /**
  * @param {string} id
+ * @param {string | null | undefined} type Empty string or null clears.
+ */
+async function postDiscoveryUpdateItemType(id, type) {
+    const r = await apiFetch('/api/items/item-type', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ id, type: type === undefined || type === null ? null : String(type) })
+    });
+    const t = await r.text();
+    if (!r.ok) {
+        let err = t;
+        try {
+            const j = JSON.parse(t);
+            if (j && typeof j.error === 'string') err = j.error;
+        } catch {
+            /* keep raw */
+        }
+        throw new Error(err || `${r.status}`);
+    }
+    return JSON.parse(t);
+}
+
+/**
+ * @param {string} id
  * @returns {Promise<boolean>} true if deleted
  */
 async function runDiscoveryDeleteFlow(id) {
@@ -1323,6 +1350,7 @@ function setDiscoveryEditModalOpen(open) {
             clearTimeout(discoveryEditSearchTimer);
             discoveryEditSearchTimer = 0;
         }
+        if (discoveryEditItemTypeSelectEl) discoveryEditItemTypeSelectEl.value = '';
         resetDiscoveryEditImageUi();
     }
 }
@@ -1359,6 +1387,10 @@ function openDiscoveryEditModal(row) {
     discoveryEditTargetId = String(row.id || '').trim();
     discoveryEditSlot = '';
     if (discoveryEditItemNameEl) discoveryEditItemNameEl.textContent = row.name || row.id;
+    if (discoveryEditItemTypeSelectEl) {
+        const t = typeof row.type === 'string' && row.type.trim() ? row.type.trim() : '';
+        discoveryEditItemTypeSelectEl.value = t;
+    }
     fillDiscoveryEditIngredientLabels(row);
     hideDiscoveryEditPicker();
     resetDiscoveryEditImageUi();
@@ -1848,6 +1880,12 @@ function buildGlobalDiscoveryRowElement(row, depth) {
     nameEl.className = 'text-sm text-slate-100 truncate';
     if (row.nameColor) nameEl.style.color = row.nameColor;
     nameEl.textContent = row.name;
+    if (row.type) {
+        const typeEl = document.createElement('div');
+        typeEl.className = 'text-[10px] text-sky-400/95 font-mono truncate';
+        typeEl.textContent = row.type;
+        textWrap.appendChild(typeEl);
+    }
     const comboEl = document.createElement('div');
     comboEl.className = 'text-[11px] text-slate-400 truncate';
     comboEl.textContent = comboText;
@@ -2267,6 +2305,9 @@ const discoveryEditPickerLabelEl = document.getElementById('discovery-edit-picke
 const discoveryEditSearchInputEl = /** @type {HTMLInputElement | null} */ (document.getElementById('discovery-edit-search-input'));
 const discoveryEditSearchResultsEl = document.getElementById('discovery-edit-search-results');
 const discoveryEditDeleteBtn = document.getElementById('discovery-edit-delete');
+const discoveryEditItemTypeSelectEl = /** @type {HTMLSelectElement | null} */ (
+    document.getElementById('discovery-edit-item-type')
+);
 const discoveryEditAiImageBtn = document.getElementById('discovery-edit-ai-image-btn');
 const discoveryEditOpenCustomIconBtn = document.getElementById('discovery-edit-open-custom-icon');
 const discoveryEditAiImageStatusEl = document.getElementById('discovery-edit-ai-image-status');
@@ -5837,6 +5878,35 @@ if (discoveryEditDeleteBtn) {
             alert(msg.slice(0, 240));
         } finally {
             discoveryEditDeleteBtn.removeAttribute('disabled');
+        }
+    });
+}
+
+if (discoveryEditItemTypeSelectEl) {
+    discoveryEditItemTypeSelectEl.addEventListener('change', async () => {
+        const tid = discoveryEditTargetId;
+        if (!tid) return;
+        const v = discoveryEditItemTypeSelectEl.value.trim();
+        discoveryEditItemTypeSelectEl.disabled = true;
+        try {
+            await postDiscoveryUpdateItemType(tid, v || null);
+            await reloadCatalogFromApi();
+            await refreshGlobalDiscoveriesFromApi();
+            const row = globalDiscoveriesRows.find((r) => r.id === tid);
+            if (row && discoveryEditItemTypeSelectEl) {
+                discoveryEditItemTypeSelectEl.value =
+                    typeof row.type === 'string' && row.type.trim() ? row.type.trim() : '';
+            }
+        } catch (e) {
+            const msg = e && typeof e.message === 'string' ? e.message : String(e);
+            alert(msg.slice(0, 240));
+            const row = globalDiscoveriesRows.find((r) => r.id === tid);
+            if (row && discoveryEditItemTypeSelectEl) {
+                discoveryEditItemTypeSelectEl.value =
+                    typeof row.type === 'string' && row.type.trim() ? row.type.trim() : '';
+            }
+        } finally {
+            discoveryEditItemTypeSelectEl.disabled = false;
         }
     });
 }

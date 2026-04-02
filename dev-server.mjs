@@ -22,6 +22,7 @@ import {
     searchItemsByNameSubstring,
     getItemIngredientIds,
     updateDiscoveryIngredients,
+    setItemItemType,
     createUser,
     getUserByUsername,
     getUserById,
@@ -1699,6 +1700,34 @@ const server = http.createServer((req, res) => {
                 }
                 recipeIndex = buildRecipeIndex(getItemsMap(db));
                 sendJson(res, 200, { ok: true, id, ingredient_a: newA, ingredient_b: newB }, CORS_API);
+            })
+            .catch((err) => send(res, 500, String(err.message || err), CORS_API));
+        return;
+    }
+
+    if (req.method === 'POST' && pathOnly === '/api/items/item-type') {
+        const auth = authenticate(req);
+        if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        readRequestBody(req)
+            .then((raw) => {
+                const body = parseBody(raw);
+                if (!body) return send(res, 400, 'Invalid JSON', CORS_API);
+                const id = typeof body.id === 'string' ? body.id.trim() : '';
+                const typeRaw = body.type;
+                const type =
+                    typeRaw === null || typeRaw === undefined
+                        ? ''
+                        : typeof typeRaw === 'string'
+                          ? typeRaw.trim()
+                          : '';
+                if (!id) return send(res, 400, 'id required', CORS_API);
+                const out = setItemItemType(db, id, type || null);
+                if (!out.ok) {
+                    const status = out.error && /not found/.test(out.error) ? 404 : 400;
+                    return send(res, status, out.error || 'update failed', CORS_API);
+                }
+                recipeIndex = buildRecipeIndex(getItemsMap(db));
+                sendJson(res, 200, { ok: true, id, type: type || null }, CORS_API);
             })
             .catch((err) => send(res, 500, String(err.message || err), CORS_API));
         return;

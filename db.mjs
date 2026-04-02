@@ -61,6 +61,23 @@ function migrateItemsUniqueName(db) {
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_items_name_unique_nocase ON items(name COLLATE NOCASE)');
 }
 
+function migrateItemsItemType(db) {
+    const cols = db.prepare('PRAGMA table_info(items)').all();
+    if (!cols.some((c) => c.name === 'item_type')) {
+        db.exec('ALTER TABLE items ADD COLUMN item_type TEXT');
+    }
+}
+
+/** Allowed `item_type` values (exposed as `type` in JSON). */
+export const ITEM_TYPE_VALUES = [
+    'TransportGround',
+    'TransportWater',
+    'TransportAir',
+    'ArmyAir',
+    'ArmyGround',
+    'ArmyWater'
+];
+
 function migrateDiscoveryProposalTables(db) {
     db.exec(`
         CREATE TABLE IF NOT EXISTS discovery_proposals (
@@ -220,6 +237,7 @@ export function openDb() {
     migrateItemsVotes(db);
     migrateItemsIconSizeBytes(db);
     migrateItemsUniqueName(db);
+    migrateItemsItemType(db);
     migrateDiscoveryProposalTables(db);
     migrateUsersLastSeenAt(db);
     migrateRemoveWaterDirt(db);
@@ -244,6 +262,7 @@ export function getItemsMap(db) {
                 i.discovered_at,
                 i.upvotes,
                 i.downvotes,
+                i.item_type,
                 u.username AS discovered_by_username
              FROM items AS i
              LEFT JOIN users AS u
@@ -282,6 +301,9 @@ export function getItemsMap(db) {
         if (row.downvotes != null && Number(row.downvotes) > 0) {
             entry.downvotes = Number(row.downvotes) | 0;
         }
+        if (row.item_type != null && String(row.item_type).trim() !== '') {
+            entry.type = String(row.item_type).trim();
+        }
         out[row.id] = entry;
     }
     return out;
@@ -300,8 +322,8 @@ export function upsertItem(db, row) {
             ? name_color.trim().toLowerCase()
             : null;
     db.prepare(
-        `INSERT INTO items (id, emoji, name, name_color, ingredient_a, ingredient_b, discovered_by, discovered_at)
-         VALUES (@id, @emoji, @name, @name_color, @ingredient_a, @ingredient_b, @discovered_by, @discovered_at)
+        `INSERT INTO items (id, emoji, name, name_color, ingredient_a, ingredient_b, discovered_by, discovered_at, item_type)
+         VALUES (@id, @emoji, @name, @name_color, @ingredient_a, @ingredient_b, @discovered_by, @discovered_at, NULL)
          ON CONFLICT(id) DO UPDATE SET
            emoji = excluded.emoji,
            name = excluded.name,
@@ -320,6 +342,28 @@ export function upsertItem(db, row) {
         discovered_by: discovered_by ?? null,
         discovered_at: discovered_at ?? null
     });
+}
+
+/**
+ * Set optional gameplay `item_type` (stored column `item_type`, API field `type`).
+ * Pass `null` or `''` to clear.
+ * @param {import('better-sqlite3').Database} db
+ * @param {string} itemId
+ * @param {string | null | undefined} itemType
+ * @returns {{ ok: boolean, error?: string }}
+ */
+export function setItemItemType(db, itemId, itemType) {
+    const id = String(itemId || '').trim();
+    if (!id) return { ok: false, error: 'missing id' };
+    if (!itemIdExists(db, id)) return { ok: false, error: 'item not found' };
+    let v = null;
+    if (itemType != null && String(itemType).trim() !== '') {
+        const s = String(itemType).trim();
+        if (!ITEM_TYPE_VALUES.includes(s)) return { ok: false, error: 'invalid type' };
+        v = s;
+    }
+    db.prepare('UPDATE items SET item_type = @v WHERE id = @id').run({ id, v });
+    return { ok: true };
 }
 
 /**
