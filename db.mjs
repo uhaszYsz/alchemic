@@ -8,8 +8,6 @@ const dbPath = path.join(__dirname, 'data', 'alchemic.db');
 const SEED = [
     ['wood', '🪵', 'Wood'],
     ['stone', '🪨', 'Stone'],
-    ['water', '💧', 'Water'],
-    ['dirt', '🟫', 'Dirt'],
     ['flint', '🗿', 'Flint'],
     ['plants', '🌿', 'Plants']
 ];
@@ -101,7 +99,43 @@ function migrateUsersLastSeenAt(db) {
 }
 
 /**
- * Base catalog starters (wood/stone/water/dirt/flint/plants). INSERT OR IGNORE so
+ * Remove legacy base items water/dirt and any discoveries that used them in recipes.
+ */
+function migrateRemoveWaterDirt(db) {
+    const delOne = (targetId) => {
+        const id = String(targetId || '').trim();
+        if (!id) return;
+        const tx = db.transaction((tid) => {
+            db.prepare(
+                `DELETE FROM discovery_proposal_votes
+                 WHERE proposal_id IN (SELECT id FROM discovery_proposals WHERE item_id = @id)`
+            ).run({ id: tid });
+            db.prepare('DELETE FROM discovery_proposals WHERE item_id = @id').run({ id: tid });
+            db.prepare('DELETE FROM rejectedCrafts WHERE item_a_id = @id OR item_b_id = @id').run({ id: tid });
+            db.prepare('DELETE FROM items WHERE id = @id').run({ id: tid });
+        });
+        tx(id);
+    };
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const rows = db
+            .prepare(
+                `SELECT id FROM items WHERE ingredient_a IN ('water','dirt') OR ingredient_b IN ('water','dirt')`
+            )
+            .all();
+        for (const r of rows) {
+            delOne(String(r.id));
+            changed = true;
+        }
+    }
+    db.prepare(`DELETE FROM user_inventory WHERE item_id IN ('water','dirt')`).run();
+    delOne('water');
+    delOne('dirt');
+}
+
+/**
+ * Base catalog starters (wood/stone/flint/plants). INSERT OR IGNORE so
  * existing rows are untouched; missing ids are added (fixes DBs that only got flint+plants
  * from an older migration that ran before the empty-DB seed block).
  */
@@ -188,6 +222,7 @@ export function openDb() {
     migrateItemsUniqueName(db);
     migrateDiscoveryProposalTables(db);
     migrateUsersLastSeenAt(db);
+    migrateRemoveWaterDirt(db);
     ensureSeedBaseItems(db);
     return db;
 }

@@ -43,10 +43,18 @@ const state = {
         selectedBuilding: null,
         /**
          * Optional resource deposits on inner cells (item id, e.g. wood, flint).
-         * Used for extractor rules and future mechanics. Corners are not stored here.
+         * Legacy: direct deposit on a cell. Superseded for new setups by gatheringPoints + ring.
          * @type {Record<string, string>}
          */
         cellResources: {},
+        /**
+         * Gathering hub per cell: one cell shows the deposit; eight neighbors (incl. diagonals) are extractable.
+         * Hub cell is blocked for buildings; value is material item id (e.g. wood).
+         * @type {Record<string, string>}
+         */
+        gatheringPoints: {},
+        /** When set, next click on the grid places a gathering hub for this base material. */
+        gatheringPlaceMaterialId: /** @type {null | string} */ (null),
         /** Transporter flow: 0 = up, 1 = right, 2 = down, 3 = left (➡ + rotate offset in UI) */
         transporterDirs: {},
         /** Sorter output direction: 0 up, 1 right, 2 down, 3 left */
@@ -2281,6 +2289,8 @@ function normalizeFactoryFromServer(factory) {
     state.factory.placements = factory.placements && typeof factory.placements === 'object' ? factory.placements : {};
     state.factory.cellResources =
         factory.cellResources && typeof factory.cellResources === 'object' ? factory.cellResources : {};
+    state.factory.gatheringPoints =
+        factory.gatheringPoints && typeof factory.gatheringPoints === 'object' ? factory.gatheringPoints : {};
     state.factory.transporterDirs =
         factory.transporterDirs && typeof factory.transporterDirs === 'object' ? factory.transporterDirs : {};
     state.factory.sorterDirs = factory.sorterDirs && typeof factory.sorterDirs === 'object' ? factory.sorterDirs : {};
@@ -2313,6 +2323,7 @@ function buildFactoryPayload() {
     return {
         placements: state.factory.placements,
         cellResources: state.factory.cellResources,
+        gatheringPoints: state.factory.gatheringPoints,
         transporterDirs: state.factory.transporterDirs,
         sorterDirs: state.factory.sorterDirs,
         sorterItemFilters: state.factory.sorterItemFilters,
@@ -3438,6 +3449,7 @@ function factoryShiftKeyedMaps(dc, dr) {
         state.factory.itemSlides = out;
     }
     state.factory.cellResources = /** @type {typeof state.factory.cellResources} */ (shift(state.factory.cellResources));
+    state.factory.gatheringPoints = /** @type {typeof state.factory.gatheringPoints} */ (shift(state.factory.gatheringPoints));
     state.factory.cellItems = /** @type {typeof state.factory.cellItems} */ (shift(state.factory.cellItems));
     state.factory.cellRejectFlashUntil = /** @type {typeof state.factory.cellRejectFlashUntil} */ (
         shift(state.factory.cellRejectFlashUntil)
@@ -3462,6 +3474,15 @@ function factoryGridCols() {
 function factoryGridRows() {
     return factoryGridCols();
 }
+
+/** @param {number} col @param {number} row */
+function factoryCellOnGrid(col, row) {
+    const n = factoryGridCols();
+    return Number.isFinite(col) && Number.isFinite(row) && col >= 0 && row >= 0 && col < n && row < n;
+}
+
+/** Base materials allowed for gathering hub placement. */
+const FACTORY_GATHERING_MATERIAL_IDS = ['wood', 'stone', 'flint', 'plants'];
 
 function factoryLoopIntervalMs() {
     const n = Number(state.factory.loopMs);
@@ -3507,6 +3528,29 @@ function factoryMaterialFromCornerSources(col, row) {
 
 function factoryCellResourceId(col, row) {
     const key = factoryPlacementKey(col, row);
+    const gp = state.factory.gatheringPoints && typeof state.factory.gatheringPoints === 'object' ? state.factory.gatheringPoints : {};
+    const hubHere = gp[key];
+    if (hubHere && typeof hubHere === 'string' && hubHere.trim()) {
+        return null;
+    }
+    const ring = [
+        [-1, -1],
+        [-1, 0],
+        [-1, 1],
+        [0, -1],
+        [0, 1],
+        [1, -1],
+        [1, 0],
+        [1, 1]
+    ];
+    for (const [dc, dr] of ring) {
+        const nc = col + dc;
+        const nr = row + dr;
+        if (!factoryCellOnGrid(nc, nr)) continue;
+        const nk = factoryPlacementKey(nc, nr);
+        const m = gp[nk];
+        if (m && typeof m === 'string' && m.trim()) return m.trim();
+    }
     const stored = state.factory.cellResources[key];
     if (stored && typeof stored === 'string' && stored.trim()) return stored.trim();
     return factoryMaterialFromCornerSources(col, row);
@@ -3880,8 +3924,10 @@ function factoryTransporterDirFromTo(from, to) {
  */
 function factoryFilterBeltPath(rawPath) {
     const out = [];
+    const gp = state.factory.gatheringPoints && typeof state.factory.gatheringPoints === 'object' ? state.factory.gatheringPoints : {};
     for (const cell of rawPath) {
         const k = factoryPlacementKey(cell.col, cell.row);
+        if (gp[k]) break;
         const p = state.factory.placements[k];
         if (!p || p === 'transporter') out.push(cell);
         else break;
@@ -4008,10 +4054,13 @@ function factoryClearBeltLineState() {
 function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     const key = factoryPlacementKey(col, row);
     const placement = state.factory.placements[key];
+    const gp = state.factory.gatheringPoints && typeof state.factory.gatheringPoints === 'object' ? state.factory.gatheringPoints : {};
+    const gatherHubId =
+        gp[key] && typeof gp[key] === 'string' && gp[key].trim() ? gp[key].trim() : '';
     const resId = factoryCellResourceId(col, row);
     const resIcon = resId ? emojiForItemId(resId) : '';
     const resImg = resId ? factoryGetLoadedIconImage(resId) : null;
-    const hasRes = Boolean(resId);
+    const hasRes = Boolean(resId) || Boolean(gatherHubId);
     const carryId = state.factory.cellItems[key];
     const carryIcon = carryId ? emojiForItemId(carryId) : '';
     const carryImg = carryId ? factoryGetLoadedIconImage(carryId) : null;
@@ -4028,14 +4077,31 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     ctx.fillStyle = light ? '#e6e2d6' : '#d9d4c6';
     ctx.fillRect(0, 0, w, h);
     if (hasRes) {
-        ctx.fillStyle = 'rgba(52, 140, 72, 0.16)';
+        ctx.fillStyle = gatherHubId ? 'rgba(22, 101, 52, 0.22)' : 'rgba(52, 140, 72, 0.16)';
         ctx.fillRect(0, 0, w, h);
     }
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.06)';
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
 
-    if (!placement && hasRes && (resImg || resIcon)) {
+    if (!placement && gatherHubId) {
+        const gIcon = emojiForItemId(gatherHubId);
+        const gImg = factoryGetLoadedIconImage(gatherHubId);
+        ctx.shadowColor = 'rgba(0,0,0,0.28)';
+        ctx.shadowBlur = 5 * sc;
+        ctx.shadowOffsetY = 2;
+        if (gImg) {
+            const sz = Math.min(w, h) * 0.88;
+            ctx.drawImage(gImg, midX - sz / 2, midY - sz / 2, sz, sz);
+        } else if (gIcon) {
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = fs(34);
+            ctx.fillStyle = '#14532d';
+            ctx.fillText(gIcon, midX, midY);
+        }
+        ctx.shadowBlur = 0;
+    } else if (!placement && hasRes && (resImg || resIcon)) {
         ctx.shadowColor = 'rgba(0,0,0,0.2)';
         ctx.shadowBlur = 3 * sc;
         ctx.shadowOffsetY = 1;
@@ -4490,12 +4556,34 @@ function factoryHandleCellAction(col, row, shiftKey) {
         delete state.factory.combinerDirs[key];
         delete state.factory.combinerDiscovery[key];
         delete state.factory.cellItems[key];
+        delete state.factory.gatheringPoints[key];
         factoryClearSlidesTouchingKey(key);
         notifyFactoryStateMutated();
         return;
     }
     const placement = state.factory.placements[key];
     const sel = state.factory.selectedBuilding;
+    const placeMat = state.factory.gatheringPlaceMaterialId;
+    if (
+        placeMat &&
+        typeof placeMat === 'string' &&
+        FACTORY_GATHERING_MATERIAL_IDS.includes(placeMat) &&
+        factoryCellOnGrid(col, row)
+    ) {
+        delete state.factory.placements[key];
+        delete state.factory.transporterDirs[key];
+        delete state.factory.sorterDirs[key];
+        delete state.factory.sorterItemFilters[key];
+        delete state.factory.bridgeDirs[key];
+        delete state.factory.combinerDirs[key];
+        delete state.factory.combinerDiscovery[key];
+        delete state.factory.cellItems[key];
+        factoryClearSlidesTouchingKey(key);
+        delete state.factory.cellResources[key];
+        state.factory.gatheringPoints[key] = placeMat;
+        notifyFactoryStateMutated();
+        return;
+    }
 
     if (state.factory.combinerDiscovery[key]) {
         const d = state.factory.combinerDiscovery[key];
@@ -4528,6 +4616,9 @@ function factoryHandleCellAction(col, row, shiftKey) {
     }
 
     if (!sel) return;
+    if (state.factory.gatheringPoints[key]) {
+        return;
+    }
     if (sel === 'extractor' && !factoryCellResourceId(col, row)) {
         return;
     }
@@ -4581,6 +4672,22 @@ function factoryHandleCellAction(col, row, shiftKey) {
     notifyFactoryStateMutated();
 }
 
+function updateFactoryGatheringButtons() {
+    const mat = state.factory.gatheringPlaceMaterialId;
+    document.querySelectorAll('.factory-gathering-btn').forEach((btn) => {
+        const id = btn.getAttribute('data-factory-gathering-material');
+        const on = id === mat;
+        btn.classList.toggle('border-emerald-400', on);
+        btn.classList.toggle('bg-emerald-900/40', on);
+        btn.classList.toggle('text-emerald-100', on);
+        btn.classList.toggle('ring-1', on);
+        btn.classList.toggle('ring-emerald-500/50', on);
+        btn.classList.toggle('border-slate-600', !on);
+        btn.classList.toggle('bg-slate-800', !on);
+        btn.classList.toggle('text-slate-200', !on);
+    });
+}
+
 function updateFactoryBuildButtons() {
     const layout =
         'factory-build-btn w-full flex items-center gap-3 py-3 px-3 rounded-xl border text-left text-sm transition min-h-[3.25rem] ';
@@ -4594,6 +4701,7 @@ function updateFactoryBuildButtons() {
                 ? 'border-amber-500 bg-amber-900/30 text-amber-100 ring-1 ring-amber-500/50'
                 : 'border-slate-600 bg-slate-800 hover:border-amber-500/60 text-slate-200');
     });
+    updateFactoryGatheringButtons();
 }
 
 function renderFactoryGrid() {
@@ -5151,6 +5259,8 @@ if (factoryClearBtn) {
         state.factory.placements = {};
         state.factory.selectedBuilding = null;
         state.factory.cellResources = {};
+        state.factory.gatheringPoints = {};
+        state.factory.gatheringPlaceMaterialId = null;
         state.factory.transporterDirs = {};
         state.factory.sorterDirs = {};
         state.factory.sorterItemFilters = {};
@@ -5846,7 +5956,19 @@ document.querySelectorAll('.factory-build-btn').forEach((btn) => {
         const t = btn.getAttribute('data-factory-building');
         if (!t || (t !== 'transporter' && t !== 'extractor' && t !== 'combiner' && t !== 'storage' && t !== 'sorter' && t !== 'bridge')) return;
         factoryClearBeltLineState();
+        state.factory.gatheringPlaceMaterialId = null;
         state.factory.selectedBuilding = state.factory.selectedBuilding === t ? null : t;
+        updateFactoryBuildButtons();
+    });
+});
+
+document.querySelectorAll('.factory-gathering-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-factory-gathering-material');
+        if (!id || !FACTORY_GATHERING_MATERIAL_IDS.includes(id)) return;
+        factoryClearBeltLineState();
+        state.factory.selectedBuilding = null;
+        state.factory.gatheringPlaceMaterialId = state.factory.gatheringPlaceMaterialId === id ? null : id;
         updateFactoryBuildButtons();
     });
 });
