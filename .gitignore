@@ -1,1 +1,7 @@
 /key.txt
+
+# SQLite — local / runtime only (never commit or push)
+/data/*.db
+/data/*.db-wal
+/data/*.db-shm
+/data/*.db-journal
