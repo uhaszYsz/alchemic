@@ -104,7 +104,7 @@ const state = {
         userId: 0,
         /** @type {number | null} */
         activeFactoryId: null,
-        /** @type {{ factoryId: number, worldCol: number, worldRow: number }[]} */
+        /** @type {{ factoryId: number, worldCol: number | null, worldRow: number | null }[]} */
         myFactories: [],
         playerPingTimerId: null,
         factoryRuntimeTimerId: null,
@@ -2762,8 +2762,8 @@ async function refreshFactoryListFromServer() {
         const list = Array.isArray(payload && payload.factories) ? payload.factories : [];
         state.auth.myFactories = list.map((x) => ({
             factoryId: Math.max(1, Number(x.factoryId) | 0),
-            worldCol: Number(x.worldCol) | 0,
-            worldRow: Number(x.worldRow) | 0
+            worldCol: x.worldCol != null && x.worldCol !== '' ? Number(x.worldCol) | 0 : null,
+            worldRow: x.worldRow != null && x.worldRow !== '' ? Number(x.worldRow) | 0 : null
         }));
         if (
             (state.auth.activeFactoryId == null || state.auth.activeFactoryId < 1) &&
@@ -2788,7 +2788,7 @@ function renderActiveFactoryList() {
     if (!el) return;
     const mine = state.auth.myFactories || [];
     if (!mine.length) {
-        el.textContent = 'None yet — claim a cell on the map.';
+        el.textContent = 'No factories loaded — refresh or re-login.';
         return;
     }
     el.innerHTML = '';
@@ -2799,7 +2799,10 @@ function renderActiveFactoryList() {
             'w-full text-left px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-800/80 hover:bg-slate-700 text-slate-200';
         const on = state.auth.activeFactoryId === f.factoryId;
         if (on) row.classList.add('ring-1', 'ring-amber-500');
-        row.textContent = `Factory #${f.factoryId} @ (${f.worldCol}, ${f.worldRow})`;
+        const onMap = f.worldCol != null && f.worldRow != null;
+        row.textContent = onMap
+            ? `Factory #${f.factoryId} — map (${f.worldCol}, ${f.worldRow})`
+            : `Factory #${f.factoryId} — home (not on map)`;
         row.addEventListener('click', () => {
             state.auth.activeFactoryId = f.factoryId;
             renderActiveFactoryList();
@@ -2831,6 +2834,7 @@ async function runAuthRequest(path) {
         const payload = await r.json();
         state.auth.token = String(payload.token || '');
         state.auth.username = String(payload.username || username);
+        if (payload && typeof payload.userId === 'number') state.auth.userId = Number(payload.userId) | 0;
         if (payload && typeof payload === 'object' && payload.inventory) {
             applyServerInventorySnapshot(payload.inventory);
         }
@@ -5169,8 +5173,8 @@ async function worldTryClaimOrOpen(col, row) {
         if (Array.isArray(payload.factories)) {
             state.auth.myFactories = payload.factories.map((x) => ({
                 factoryId: Math.max(1, Number(x.factoryId) | 0),
-                worldCol: Number(x.worldCol) | 0,
-                worldRow: Number(x.worldRow) | 0
+                worldCol: x.worldCol != null && x.worldCol !== '' ? Number(x.worldCol) | 0 : null,
+                worldRow: x.worldRow != null && x.worldRow !== '' ? Number(x.worldRow) | 0 : null
             }));
         } else {
             await refreshFactoryListFromServer();
@@ -5450,8 +5454,7 @@ function setWorkspace(which) {
     if (isFactory) {
         void refreshFactoryListFromServer().then(() => {
             if (!state.auth.myFactories.length) {
-                setWorkspace('world');
-                setAuthStatus('Claim a map cell to create your first factory.');
+                setAuthStatus('No factories loaded. Open Map tab or re-login.');
                 return;
             }
             if (state.auth.activeFactoryId == null) {

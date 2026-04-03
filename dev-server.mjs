@@ -36,6 +36,7 @@ import {
     saveUserFactoryState,
     loadUserFactoryState,
     listUserFactories,
+    ensureUserHomeFactory,
     claimWorldMapCellForNewFactory,
     listWorldMapCellsInRect,
     addFactorySnapshoot,
@@ -373,6 +374,12 @@ function defaultFactoryState() {
         _factoryIdleGrantedAtIso: null,
         _factoryIdleRemainder: {}
     };
+}
+
+function ensureHomeFactoryRow(userId) {
+    const uid = Number(userId) | 0;
+    if (!uid) return;
+    ensureUserHomeFactory(db, uid, JSON.stringify(defaultFactoryState()));
 }
 
 function sanitizeFactoryState(raw) {
@@ -1245,6 +1252,7 @@ const server = http.createServer((req, res) => {
                     passwordSalt: salt
                 });
                 if (!user) return send(res, 409, 'username already exists', CORS_API);
+                ensureHomeFactoryRow(user.id);
                 const token = randomTokenHex(32);
                 upsertSession(db, { tokenHash: sha256Hex(token), userId: user.id, expiresAtIso: sessionExpiryIso() });
                 sendJson(
@@ -1253,6 +1261,7 @@ const server = http.createServer((req, res) => {
                     {
                         ok: true,
                         token,
+                        userId: user.id,
                         username: user.username,
                         inventory: getUserInventoryMap(db, user.id),
                         lastSeen: new Date().toISOString()
@@ -1275,6 +1284,7 @@ const server = http.createServer((req, res) => {
                 if (!user) return send(res, 401, 'invalid credentials', CORS_API);
                 const expected = passwordHash(password, user.password_salt);
                 if (expected !== user.password_hash) return send(res, 401, 'invalid credentials', CORS_API);
+                ensureHomeFactoryRow(user.id);
                 const token = randomTokenHex(32);
                 upsertSession(db, {
                     tokenHash: sha256Hex(token),
@@ -1287,6 +1297,7 @@ const server = http.createServer((req, res) => {
                     {
                         ok: true,
                         token,
+                        userId: Number(user.id),
                         username: user.username,
                         inventory: getUserInventoryMap(db, user.id),
                         lastSeen: new Date().toISOString()
@@ -1305,6 +1316,7 @@ const server = http.createServer((req, res) => {
             return;
         }
         const user = getUserById(db, auth.userId);
+        ensureHomeFactoryRow(auth.userId);
         sendJson(
             res,
             200,
@@ -1437,6 +1449,7 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && pathOnly === '/api/factories') {
         const auth = authenticate(req);
         if (!auth) return send(res, 401, 'unauthorized', CORS_API);
+        ensureHomeFactoryRow(auth.userId);
         const list = listUserFactories(db, auth.userId);
         sendJson(res, 200, { ok: true, factories: list, userId: auth.userId }, CORS_API);
         return;

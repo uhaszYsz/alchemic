@@ -217,13 +217,12 @@ export function openDb() {
         CREATE TABLE IF NOT EXISTS user_factories (
             user_id INTEGER NOT NULL,
             factory_id INTEGER NOT NULL,
-            world_col INTEGER NOT NULL,
-            world_row INTEGER NOT NULL,
+            world_col INTEGER,
+            world_row INTEGER,
             state_json TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (user_id, factory_id),
-            FOREIGN KEY(user_id) REFERENCES users(id),
-            UNIQUE (world_col, world_row)
+            FOREIGN KEY(user_id) REFERENCES users(id)
         );
         CREATE TABLE IF NOT EXISTS snapshoots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,14 +246,71 @@ export function openDb() {
     migrateDiscoveryProposalTables(db);
     migrateUsersLastSeenAt(db);
     migrateRemoveWaterDirt(db);
+    migrateUserFactoriesNullableWorld(db);
     migrateLegacyUserFactoryState(db);
+    migrateHomeFactoriesOffWorldMap(db);
     migrateSnapshootsFactoryId(db);
+    ensureUserFactoriesWorldCellUniqueIndex(db);
     ensureSeedBaseItems(db);
     return db;
 }
 
+/** Rebuild user_factories so world_col/world_row can be NULL (home factory is not on the map). */
+function migrateUserFactoriesNullableWorld(db) {
+    const t = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='user_factories'`)
+        .get();
+    if (!t) return;
+    const cols = db.prepare('PRAGMA table_info(user_factories)').all();
+    const wc = cols.find((c) => c.name === 'world_col');
+    if (!wc || wc.notnull === 0) return;
+    const tx = db.transaction(() => {
+        db.exec(`
+            CREATE TABLE user_factories__new (
+                user_id INTEGER NOT NULL,
+                factory_id INTEGER NOT NULL,
+                world_col INTEGER,
+                world_row INTEGER,
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, factory_id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+        `);
+        db.exec(`INSERT INTO user_factories__new SELECT * FROM user_factories`);
+        db.exec(`DROP TABLE user_factories`);
+        db.exec(`ALTER TABLE user_factories__new RENAME TO user_factories`);
+    });
+    try {
+        tx();
+    } catch (e) {
+        console.warn('[db] migrateUserFactoriesNullableWorld', e);
+    }
+}
+
+function ensureUserFactoriesWorldCellUniqueIndex(db) {
+    try {
+        db.exec(`
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_user_factories_world_cell
+            ON user_factories(world_col, world_row)
+            WHERE world_col IS NOT NULL AND world_row IS NOT NULL
+        `);
+    } catch (e) {
+        console.warn('[db] ensureUserFactoriesWorldCellUniqueIndex', e);
+    }
+}
+
+/** Factory #1 is the home factory and is never placed on the world map. */
+function migrateHomeFactoriesOffWorldMap(db) {
+    try {
+        db.exec(`UPDATE user_factories SET world_col = NULL, world_row = NULL WHERE factory_id = 1`);
+    } catch (e) {
+        console.warn('[db] migrateHomeFactoriesOffWorldMap', e);
+    }
+}
+
 /**
- * Copy legacy single-factory table into user_factories (one row per user at world 0,user_id).
+ * Copy legacy single-factory table into user_factories (factory 1, not on map).
  */
 function migrateLegacyUserFactoryState(db) {
     const legacy = db
@@ -265,14 +321,13 @@ function migrateLegacyUserFactoryState(db) {
         const rows = db.prepare('SELECT user_id, state_json, updated_at FROM user_factory_state').all();
         const ins = db.prepare(
             `INSERT OR IGNORE INTO user_factories (user_id, factory_id, world_col, world_row, state_json, updated_at)
-             VALUES (@user_id, 1, 0, @world_row, @state_json, @updated_at)`
+             VALUES (@user_id, 1, NULL, NULL, @state_json, @updated_at)`
         );
         for (const row of rows) {
             const uid = Number(row.user_id) | 0;
             if (!uid) continue;
             ins.run({
                 user_id: uid,
-                world_row: uid,
                 state_json: String(row.state_json || '{}'),
                 updated_at: String(row.updated_at || new Date().toISOString())
             });
@@ -1020,7 +1075,7 @@ export function loadUserFactoryState(db, userId, factoryId) {
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {number} userId
- * @returns {{ factoryId: number, worldCol: number, worldRow: number }[]}
+ * @returns {{ factoryId: number, worldCol: number | null, worldRow: number | null }[]}
  */
 export function listUserFactories(db, userId) {
     const uid = Number(userId) | 0;
@@ -1033,9 +1088,52 @@ export function listUserFactories(db, userId) {
         .all({ uid });
     return rows.map((r) => ({
         factoryId: Number(r.factory_id) | 0,
-        worldCol: Number(r.world_col) | 0,
-        worldRow: Number(r.world_row) | 0
+        worldCol: r.world_col == null ? null : Number(r.world_col) | 0,
+        worldRow: r.world_row == null ? null : Number(r.world_row) | 0
     }));
+}
+
+/**
+ * Ensures factory_id 1 exists off-map (home factory). Call after register/login.
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @param {string} stateJson
+ * @returns {boolean} true if a new row was inserted
+ */
+export function ensureUserHomeFactory(db, userId, stateJson) {
+    const uid = Number(userId) | 0;
+    if (!uid) return false;
+    const row = db.prepare('SELECT 1 FROM user_factories WHERE user_id = ? AND factory_id = 1').get(uid);
+    if (row) return false;
+    db.prepare(
+        `INSERT INTO user_factories (user_id, factory_id, world_col, world_row, state_json, updated_at)
+         VALUES (@uid, 1, NULL, NULL, @state_json, datetime('now'))`
+    ).run({ uid, state_json: String(stateJson) });
+    return true;
+}
+
+/**
+ * True if the user has placed at least one building (non-empty `placements` entry) in any factory.
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ */
+export function userHasAnyFactoryConstruction(db, userId) {
+    const uid = Number(userId) | 0;
+    if (!uid) return false;
+    const rows = db.prepare('SELECT state_json FROM user_factories WHERE user_id = ?').all(uid);
+    for (const row of rows) {
+        let placements = {};
+        try {
+            const o = JSON.parse(String(row.state_json || '{}'));
+            if (o && typeof o.placements === 'object' && o.placements) placements = o.placements;
+        } catch {
+            continue;
+        }
+        for (const v of Object.values(placements)) {
+            if (v != null && String(v).trim() !== '') return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -1052,10 +1150,21 @@ export function claimWorldMapCellForNewFactory(db, userId, col, row, stateJson) 
     const r = Math.trunc(Number(row));
     if (!uid) return { ok: false, error: 'bad user' };
     if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false, error: 'bad coordinates' };
-    const occ = db.prepare('SELECT 1 FROM user_factories WHERE world_col = ? AND world_row = ?').get(c, r);
+    const home = db.prepare('SELECT 1 FROM user_factories WHERE user_id = ? AND factory_id = 1').get(uid);
+    if (!home) return { ok: false, error: 'home factory missing' };
+    if (!userHasAnyFactoryConstruction(db, uid)) {
+        return { ok: false, error: 'place at least one building in a factory first' };
+    }
+    const occ = db
+        .prepare(
+            `SELECT 1 FROM user_factories WHERE world_col IS NOT NULL AND world_row IS NOT NULL
+             AND world_col = ? AND world_row = ?`
+        )
+        .get(c, r);
     if (occ) return { ok: false, error: 'cell occupied' };
     const maxRow = db.prepare('SELECT MAX(factory_id) AS m FROM user_factories WHERE user_id = ?').get(uid);
     const next = (Number(maxRow && maxRow.m) || 0) + 1;
+    if (next < 2) return { ok: false, error: 'map is only for extra factories' };
     try {
         db.prepare(
             `INSERT INTO user_factories (user_id, factory_id, world_col, world_row, state_json, updated_at)
@@ -1095,7 +1204,8 @@ export function listWorldMapCellsInRect(db, minCol, minRow, maxCol, maxRow) {
                     u.username AS username
              FROM user_factories f
              JOIN users u ON u.id = f.user_id
-             WHERE f.world_col >= @minC AND f.world_col <= @maxC
+             WHERE f.world_col IS NOT NULL AND f.world_row IS NOT NULL
+               AND f.world_col >= @minC AND f.world_col <= @maxC
                AND f.world_row >= @minR AND f.world_row <= @maxR
              ORDER BY f.world_row, f.world_col`
         )
