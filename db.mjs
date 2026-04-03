@@ -214,15 +214,21 @@ export function openDb() {
             PRIMARY KEY (user_id, item_id),
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
-        CREATE TABLE IF NOT EXISTS user_factory_state (
-            user_id INTEGER PRIMARY KEY NOT NULL,
+        CREATE TABLE IF NOT EXISTS user_factories (
+            user_id INTEGER NOT NULL,
+            factory_id INTEGER NOT NULL,
+            world_col INTEGER NOT NULL,
+            world_row INTEGER NOT NULL,
             state_json TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-            FOREIGN KEY(user_id) REFERENCES users(id)
+            PRIMARY KEY (user_id, factory_id),
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            UNIQUE (world_col, world_row)
         );
         CREATE TABLE IF NOT EXISTS snapshoots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
+            factory_id INTEGER NOT NULL DEFAULT 1,
             state_json TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             FOREIGN KEY(user_id) REFERENCES users(id)
@@ -241,8 +247,53 @@ export function openDb() {
     migrateDiscoveryProposalTables(db);
     migrateUsersLastSeenAt(db);
     migrateRemoveWaterDirt(db);
+    migrateLegacyUserFactoryState(db);
+    migrateSnapshootsFactoryId(db);
     ensureSeedBaseItems(db);
     return db;
+}
+
+/**
+ * Copy legacy single-factory table into user_factories (one row per user at world 0,user_id).
+ */
+function migrateLegacyUserFactoryState(db) {
+    const legacy = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='user_factory_state'`)
+        .get();
+    if (!legacy) return;
+    const tx = db.transaction(() => {
+        const rows = db.prepare('SELECT user_id, state_json, updated_at FROM user_factory_state').all();
+        const ins = db.prepare(
+            `INSERT OR IGNORE INTO user_factories (user_id, factory_id, world_col, world_row, state_json, updated_at)
+             VALUES (@user_id, 1, 0, @world_row, @state_json, @updated_at)`
+        );
+        for (const row of rows) {
+            const uid = Number(row.user_id) | 0;
+            if (!uid) continue;
+            ins.run({
+                user_id: uid,
+                world_row: uid,
+                state_json: String(row.state_json || '{}'),
+                updated_at: String(row.updated_at || new Date().toISOString())
+            });
+        }
+        db.exec('DROP TABLE user_factory_state');
+    });
+    try {
+        tx();
+    } catch (e) {
+        console.warn('[db] migrateLegacyUserFactoryState', e);
+    }
+}
+
+function migrateSnapshootsFactoryId(db) {
+    const cols = db.prepare('PRAGMA table_info(snapshoots)').all();
+    if (cols.some((c) => c.name === 'factory_id')) return;
+    try {
+        db.exec('ALTER TABLE snapshoots ADD COLUMN factory_id INTEGER NOT NULL DEFAULT 1');
+    } catch {
+        /* ignore */
+    }
 }
 
 /** @returns {Record<string, { emoji: string, name: string, nameColor?: string, a?: string, b?: string, iconPath?: string, iconSizeBytes?: number, discoveredBy?: number, discoveredByUsername?: string, discoveredAt?: string, upvotes?: number, downvotes?: number }>} */
@@ -934,17 +985,21 @@ export function deleteSessionByTokenHash(db, tokenHash) {
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {number} userId
+ * @param {number} factoryId
  * @param {string} stateJson
  */
-export function saveUserFactoryState(db, userId, stateJson) {
+export function saveUserFactoryState(db, userId, factoryId, stateJson) {
+    const uid = Number(userId) | 0;
+    const fid = Number(factoryId) | 0;
+    if (!uid || fid < 1) return;
+    const n = db.prepare('SELECT 1 FROM user_factories WHERE user_id = ? AND factory_id = ?').get(uid, fid);
+    if (!n) return;
     db.prepare(
-        `INSERT INTO user_factory_state (user_id, state_json, updated_at)
-         VALUES (@user_id, @state_json, datetime('now'))
-         ON CONFLICT(user_id) DO UPDATE SET
-            state_json = excluded.state_json,
-            updated_at = datetime('now')`
+        `UPDATE user_factories SET state_json = @state_json, updated_at = datetime('now')
+         WHERE user_id = @user_id AND factory_id = @factory_id`
     ).run({
-        user_id: Number(userId),
+        user_id: uid,
+        factory_id: fid,
         state_json: String(stateJson)
     });
 }
@@ -952,24 +1007,121 @@ export function saveUserFactoryState(db, userId, stateJson) {
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {number} userId
+ * @param {number} factoryId
  * @returns {string | null}
  */
-export function loadUserFactoryState(db, userId) {
-    const row = db.prepare('SELECT state_json FROM user_factory_state WHERE user_id = ?').get(Number(userId));
+export function loadUserFactoryState(db, userId, factoryId) {
+    const row = db
+        .prepare('SELECT state_json FROM user_factories WHERE user_id = ? AND factory_id = ?')
+        .get(Number(userId), Number(factoryId));
     return row ? String(row.state_json) : null;
 }
 
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {number} userId
+ * @returns {{ factoryId: number, worldCol: number, worldRow: number }[]}
+ */
+export function listUserFactories(db, userId) {
+    const uid = Number(userId) | 0;
+    if (!uid) return [];
+    const rows = db
+        .prepare(
+            `SELECT factory_id, world_col, world_row FROM user_factories
+             WHERE user_id = @uid ORDER BY factory_id ASC`
+        )
+        .all({ uid });
+    return rows.map((r) => ({
+        factoryId: Number(r.factory_id) | 0,
+        worldCol: Number(r.world_col) | 0,
+        worldRow: Number(r.world_row) | 0
+    }));
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @param {number} col
+ * @param {number} row
+ * @param {string} stateJson
+ * @returns {{ ok: boolean, factoryId?: number, error?: string }}
+ */
+export function claimWorldMapCellForNewFactory(db, userId, col, row, stateJson) {
+    const uid = Number(userId) | 0;
+    const c = Math.trunc(Number(col));
+    const r = Math.trunc(Number(row));
+    if (!uid) return { ok: false, error: 'bad user' };
+    if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false, error: 'bad coordinates' };
+    const occ = db.prepare('SELECT 1 FROM user_factories WHERE world_col = ? AND world_row = ?').get(c, r);
+    if (occ) return { ok: false, error: 'cell occupied' };
+    const maxRow = db.prepare('SELECT MAX(factory_id) AS m FROM user_factories WHERE user_id = ?').get(uid);
+    const next = (Number(maxRow && maxRow.m) || 0) + 1;
+    try {
+        db.prepare(
+            `INSERT INTO user_factories (user_id, factory_id, world_col, world_row, state_json, updated_at)
+             VALUES (@user_id, @factory_id, @world_col, @world_row, @state_json, datetime('now'))`
+        ).run({
+            user_id: uid,
+            factory_id: next,
+            world_col: c,
+            world_row: r,
+            state_json: String(stateJson)
+        });
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        if (/unique/i.test(msg)) return { ok: false, error: 'cell occupied' };
+        return { ok: false, error: msg || 'insert failed' };
+    }
+    return { ok: true, factoryId: next };
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} minCol
+ * @param {number} minRow
+ * @param {number} maxCol
+ * @param {number} maxRow
+ * @returns {{ col: number, row: number, userId: number, factoryId: number, username: string }[]}
+ */
+export function listWorldMapCellsInRect(db, minCol, minRow, maxCol, maxRow) {
+    const minC = Math.trunc(Number(minCol));
+    const minR = Math.trunc(Number(minRow));
+    const maxC = Math.trunc(Number(maxCol));
+    const maxR = Math.trunc(Number(maxRow));
+    if (!Number.isFinite(minC) || !Number.isFinite(maxC) || !Number.isFinite(minR) || !Number.isFinite(maxR)) return [];
+    const rows = db
+        .prepare(
+            `SELECT f.world_col AS col, f.world_row AS row, f.user_id AS userId, f.factory_id AS factoryId,
+                    u.username AS username
+             FROM user_factories f
+             JOIN users u ON u.id = f.user_id
+             WHERE f.world_col >= @minC AND f.world_col <= @maxC
+               AND f.world_row >= @minR AND f.world_row <= @maxR
+             ORDER BY f.world_row, f.world_col`
+        )
+        .all({ minC, maxC, minR, maxR });
+    return rows.map((x) => ({
+        col: Number(x.col) | 0,
+        row: Number(x.row) | 0,
+        userId: Number(x.userId) | 0,
+        factoryId: Number(x.factoryId) | 0,
+        username: String(x.username || '')
+    }));
+}
+
+/**
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @param {number} factoryId
  * @param {string} stateJson
  */
-export function addFactorySnapshoot(db, userId, stateJson) {
+export function addFactorySnapshoot(db, userId, factoryId, stateJson) {
     db.prepare(
-        `INSERT INTO snapshoots (user_id, state_json, created_at)
-         VALUES (@user_id, @state_json, datetime('now'))`
+        `INSERT INTO snapshoots (user_id, factory_id, state_json, created_at)
+         VALUES (@user_id, @factory_id, @state_json, datetime('now'))`
     ).run({
         user_id: Number(userId),
+        factory_id: Math.max(1, Number(factoryId) | 0),
         state_json: String(stateJson)
     });
 }
@@ -977,18 +1129,22 @@ export function addFactorySnapshoot(db, userId, stateJson) {
 /**
  * @param {import('better-sqlite3').Database} db
  * @param {number} userId
+ * @param {number} factoryId
  * @returns {string | null}
  */
-export function loadLatestFactorySnapshoot(db, userId) {
+export function loadLatestFactorySnapshoot(db, userId, factoryId) {
+    const uid = Number(userId) | 0;
+    const fid = Math.max(1, Number(factoryId) | 0);
+    if (!uid) return null;
     const row = db
         .prepare(
             `SELECT state_json
              FROM snapshoots
-             WHERE user_id = @user_id
+             WHERE user_id = @user_id AND factory_id = @factory_id
              ORDER BY created_at DESC, id DESC
              LIMIT 1`
         )
-        .get({ user_id: Number(userId) });
+        .get({ user_id: uid, factory_id: fid });
     return row ? String(row.state_json) : null;
 }
 

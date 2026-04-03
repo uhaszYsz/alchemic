@@ -374,6 +374,14 @@
                 <canvas id="factory-canvas" class="absolute inset-0 block h-full w-full cursor-crosshair touch-none" width="400" height="300" aria-label="Factory floor"></canvas>
             </div>
         </div>
+        <div id="world-workspace" class="hidden relative flex-1 flex flex-col min-h-0 factory-world overflow-hidden">
+            <div id="world-canvas-wrap" class="flex-1 min-h-0 min-w-0 relative overflow-hidden">
+                <canvas id="world-canvas" class="absolute inset-0 block h-full w-full cursor-pointer touch-none" width="400" height="300" aria-label="World map"></canvas>
+            </div>
+            <p id="world-map-hint" class="shrink-0 text-[10px] text-slate-500 px-2 py-1 bg-slate-900/90 border-t border-slate-700 text-center">
+                Empty cell: claim a new factory. Your cell: open that factory.
+            </p>
+        </div>
     </div>
 
     <!-- Floating factory upgrades button (left) -->
@@ -384,6 +392,7 @@
     </div>
     <div id="floating-workspace-tabs" class="floating-left-tabs">
         <button type="button" id="tab-lab" class="floating-bullet-btn touch-manipulation is-active">Lab</button>
+        <button type="button" id="tab-world" class="floating-bullet-btn touch-manipulation">Map</button>
         <button type="button" id="tab-factory" class="floating-bullet-btn touch-manipulation">Factory</button>
     </div>
     <div id="floating-discovery-alert" class="hidden fixed right-[max(0.5rem,env(safe-area-inset-right,0px))] z-[46]" style="top: calc(max(4.8rem, env(safe-area-inset-top, 0px)) + 0.25rem);">
@@ -411,6 +420,12 @@
             <div id="library" class="p-2 sm:p-3 grid grid-cols-3 sm:grid-cols-4 gap-2 content-start">
                 <!-- Elements will be injected here -->
             </div>
+        </div>
+
+        <div id="panel-world" class="hidden flex-1 flex flex-col min-h-0 bottom-tools-scroll overflow-y-auto p-3">
+            <p class="text-xs text-slate-400 mb-2">Pan and zoom the map. Tap an empty cell to create a factory there. Tap your own cell to open that factory.</p>
+            <p class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Your factories</p>
+            <div id="active-factory-list" class="text-xs text-slate-300 space-y-1 min-h-[2rem]"></div>
         </div>
 
         <div id="panel-factory" class="hidden flex-1 flex flex-col min-h-0 bottom-tools-scroll overflow-y-auto">

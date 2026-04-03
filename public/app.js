@@ -24,7 +24,7 @@ const state = {
     discoverySelectedName: '',
     /** Hex color for discovery name label (optional, e.g. #f87171) */
     discoveryNameColor: '',
-    /** 'lab' | 'factory' */
+    /** 'lab' | 'factory' | 'world' */
     activeWorkspace: 'lab',
     /** Crafted / factory output counts; separate from the discovery library. */
     playerInventory: {},
@@ -82,6 +82,14 @@ const state = {
         /** Camera zoom multiplier (1 = default). */
         cameraZoom: 1
     },
+    worldMap: {
+        cameraX: 0,
+        cameraY: 0,
+        cameraZoom: 1,
+        /** @type {Record<string, { userId: number, factoryId: number, username: string }>} */
+        cells: {},
+        lastQueryKey: ''
+    },
     /** Last icon URL chosen in discovery modal (before saving). */
     discoveryPreviewUrl: '',
     /** Uploaded custom icon as data URL (before saving). */
@@ -93,6 +101,11 @@ const state = {
     auth: {
         token: '',
         username: '',
+        userId: 0,
+        /** @type {number | null} */
+        activeFactoryId: null,
+        /** @type {{ factoryId: number, worldCol: number, worldRow: number }[]} */
+        myFactories: [],
         playerPingTimerId: null,
         factoryRuntimeTimerId: null,
         factoryRuntimeUiTimerId: null,
@@ -2281,11 +2294,16 @@ async function openDbViewerModal() {
 const libraryEl = document.getElementById('library');
 const workspaceEl = document.getElementById('workspace');
 const factoryWorkspaceEl = document.getElementById('factory-workspace');
+const worldWorkspaceEl = document.getElementById('world-workspace');
 const factoryCanvasWrapEl = document.getElementById('factory-canvas-wrap');
 const factoryCanvasEl = /** @type {HTMLCanvasElement | null} */ (document.getElementById('factory-canvas'));
+const worldCanvasWrapEl = document.getElementById('world-canvas-wrap');
+const worldCanvasEl = /** @type {HTMLCanvasElement | null} */ (document.getElementById('world-canvas'));
 const tabLabBtn = document.getElementById('tab-lab');
+const tabWorldBtn = document.getElementById('tab-world');
 const tabFactoryBtn = document.getElementById('tab-factory');
 const panelLabEl = document.getElementById('panel-lab');
+const panelWorldEl = document.getElementById('panel-world');
 const panelFactoryEl = document.getElementById('panel-factory');
 const sidebarHintLab = document.getElementById('sidebar-hint-lab');
 const sidebarHintFactory = document.getElementById('sidebar-hint-factory');
@@ -2561,8 +2579,12 @@ async function pullFactoryRuntimeStatus() {
 
 async function startFactoryRunOnServer() {
     if (!state.auth.token) return;
+    const fid = state.auth.activeFactoryId;
+    if (fid == null || fid < 1) return;
     try {
-        const r = await apiFetch('/api/factory/run/start', { method: 'POST' });
+        const r = await apiFetch(`/api/factory/run/start?factoryId=${encodeURIComponent(String(fid))}`, {
+            method: 'POST'
+        });
         if (!r.ok) return;
         const payload = await r.json();
         if (payload && payload.runtime) applyFactoryRuntime(payload.runtime);
@@ -2675,6 +2697,8 @@ let factoryStateSyncQueued = false;
 
 async function flushFactoryStateToServer() {
     if (!state.auth.token) return;
+    const fid = state.auth.activeFactoryId;
+    if (fid == null || fid < 1) return;
     if (factoryStateSyncInFlight) {
         factoryStateSyncQueued = true;
         return;
@@ -2686,7 +2710,7 @@ async function flushFactoryStateToServer() {
             const r = await apiFetch('/api/factory/state', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ factory: buildFactoryPayload() })
+                body: JSON.stringify({ factoryId: fid, factory: buildFactoryPayload() })
             });
             if (r.ok) {
                 try {
@@ -2714,7 +2738,9 @@ function notifyFactoryStateMutated() {
 }
 
 async function pullFactoryStateFromServer() {
-    const r = await apiFetch('/api/factory/state');
+    const fid = state.auth.activeFactoryId;
+    if (fid == null || fid < 1) throw new Error('no active factory');
+    const r = await apiFetch(`/api/factory/state?factoryId=${encodeURIComponent(String(fid))}`);
     if (!r.ok) throw new Error(await r.text());
     const payload = await r.json();
     normalizeFactoryFromServer(payload && payload.factory ? payload.factory : null);
@@ -2723,6 +2749,63 @@ async function pullFactoryStateFromServer() {
     }
     if (payload && typeof payload === 'object' && payload.runtime) {
         applyFactoryRuntime(payload.runtime);
+    }
+}
+
+async function refreshFactoryListFromServer() {
+    if (!state.auth.token) return;
+    try {
+        const r = await apiFetch('/api/factories');
+        if (!r.ok) return;
+        const payload = await r.json();
+        if (payload && typeof payload.userId === 'number') state.auth.userId = Number(payload.userId) | 0;
+        const list = Array.isArray(payload && payload.factories) ? payload.factories : [];
+        state.auth.myFactories = list.map((x) => ({
+            factoryId: Math.max(1, Number(x.factoryId) | 0),
+            worldCol: Number(x.worldCol) | 0,
+            worldRow: Number(x.worldRow) | 0
+        }));
+        if (
+            (state.auth.activeFactoryId == null || state.auth.activeFactoryId < 1) &&
+            state.auth.myFactories.length > 0
+        ) {
+            state.auth.activeFactoryId = state.auth.myFactories[0].factoryId;
+        }
+        if (
+            state.auth.activeFactoryId != null &&
+            !state.auth.myFactories.some((f) => f.factoryId === state.auth.activeFactoryId)
+        ) {
+            state.auth.activeFactoryId = state.auth.myFactories.length ? state.auth.myFactories[0].factoryId : null;
+        }
+        renderActiveFactoryList();
+    } catch {
+        /* ignore */
+    }
+}
+
+function renderActiveFactoryList() {
+    const el = document.getElementById('active-factory-list');
+    if (!el) return;
+    const mine = state.auth.myFactories || [];
+    if (!mine.length) {
+        el.textContent = 'None yet — claim a cell on the map.';
+        return;
+    }
+    el.innerHTML = '';
+    for (const f of mine) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className =
+            'w-full text-left px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-800/80 hover:bg-slate-700 text-slate-200';
+        const on = state.auth.activeFactoryId === f.factoryId;
+        if (on) row.classList.add('ring-1', 'ring-amber-500');
+        row.textContent = `Factory #${f.factoryId} @ (${f.worldCol}, ${f.worldRow})`;
+        row.addEventListener('click', () => {
+            state.auth.activeFactoryId = f.factoryId;
+            renderActiveFactoryList();
+            setWorkspace('factory');
+        });
+        el.appendChild(row);
     }
 }
 
@@ -2762,6 +2845,7 @@ async function runAuthRequest(path) {
         applyLoggedInUi();
         startPlayerPingLoop();
         startFactoryRuntimeSyncLoop();
+        await refreshFactoryListFromServer();
         setAuthVisible(false);
         setAuthStatus('');
         return true;
@@ -4865,6 +4949,310 @@ function factoryStopRenderLoop() {
     factoryViewLayout = null;
 }
 
+/** @type {null | { cellPx: number, gap: number, originX: number, originY: number, stride: number, minCol: number, maxCol: number, minRow: number, maxRow: number, cssW: number, cssH: number }} */
+let worldViewLayout = null;
+/** @type {number | null} */
+let worldRenderRafId = null;
+/** @type {null | { pointerId: number, startX: number, startY: number, startCamX: number, startCamY: number, moved: boolean }} */
+let worldCameraPan = null;
+/** True until the next click — used so pan release does not fire claim/open. */
+let worldSuppressNextClick = false;
+let worldFetchTimer = 0;
+
+function worldMapKey(col, row) {
+    return `${col},${row}`;
+}
+
+function worldClampZoom(z) {
+    return Math.max(0.35, Math.min(3, Number(z) || 1));
+}
+
+function worldComputeViewLayout(cssW, cssH) {
+    const gap = 2;
+    const pad = 8;
+    const availW = Math.max(40, cssW - 2 * pad);
+    const availH = Math.max(40, cssH - 2 * pad);
+    const baseCell = Math.max(20, Math.floor(Math.min(availW, availH) / 14));
+    const zoom = worldClampZoom(state.worldMap.cameraZoom);
+    const cellPx = Math.max(12, Math.floor(baseCell * zoom));
+    const stride = cellPx + gap;
+    const camX = Number.isFinite(Number(state.worldMap.cameraX)) ? Number(state.worldMap.cameraX) : 0;
+    const camY = Number.isFinite(Number(state.worldMap.cameraY)) ? Number(state.worldMap.cameraY) : 0;
+    const originX = cssW * 0.5 - camX * stride - cellPx / 2;
+    const originY = cssH * 0.5 - camY * stride - cellPx / 2;
+    const minCol = Math.floor((0 - originX) / stride) - 1;
+    const maxCol = Math.ceil((cssW - originX) / stride) + 1;
+    const minRow = Math.floor((0 - originY) / stride) - 1;
+    const maxRow = Math.ceil((cssH - originY) / stride) + 1;
+    return { cellPx, gap, originX, originY, stride, minCol, maxCol, minRow, maxRow, cssW, cssH };
+}
+
+function worldResizeCanvas() {
+    if (!worldCanvasEl || !worldCanvasWrapEl) return;
+    const rect = worldCanvasWrapEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = rect.width;
+    const cssH = rect.height;
+    if (cssW < 4 || cssH < 4) return;
+    const bw = Math.max(1, Math.round(cssW * dpr));
+    const bh = Math.max(1, Math.round(cssH * dpr));
+    if (worldCanvasEl.width !== bw) worldCanvasEl.width = bw;
+    if (worldCanvasEl.height !== bh) worldCanvasEl.height = bh;
+}
+
+/**
+ * @param {number} clientX
+ * @param {number} clientY
+ * @returns {{ col: number, row: number } | null}
+ */
+function worldPixelToCell(clientX, clientY) {
+    const L = worldViewLayout;
+    if (!worldCanvasEl || !L) return null;
+    const rect = worldCanvasEl.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const rx = x - L.originX;
+    const ry = y - L.originY;
+    const col = Math.floor(rx / L.stride);
+    const row = Math.floor(ry / L.stride);
+    const lx = rx - col * L.stride;
+    const ly = ry - row * L.stride;
+    if (lx > L.cellPx || ly > L.cellPx) return null;
+    return { col, row };
+}
+
+function worldScheduleFetchCells() {
+    const L = worldViewLayout;
+    if (!L) return;
+    const key = `${L.minCol},${L.minRow},${L.maxCol},${L.maxRow}`;
+    if (state.worldMap.lastQueryKey === key) return;
+    state.worldMap.lastQueryKey = key;
+    if (worldFetchTimer) clearTimeout(worldFetchTimer);
+    worldFetchTimer = window.setTimeout(() => {
+        worldFetchTimer = 0;
+        void worldFetchCellsBounds(L.minCol, L.minRow, L.maxCol, L.maxRow);
+    }, 120);
+}
+
+async function worldFetchCellsBounds(minCol, minRow, maxCol, maxRow) {
+    if (!state.auth.token) return;
+    try {
+        const q = new URLSearchParams({
+            minCol: String(minCol),
+            minRow: String(minRow),
+            maxCol: String(maxCol),
+            maxRow: String(maxRow)
+        });
+        const r = await apiFetch(`/api/world/cells?${q}`);
+        if (!r.ok) return;
+        const payload = await r.json();
+        const cells = Array.isArray(payload && payload.cells) ? payload.cells : [];
+        for (const c of cells) {
+            const col = Number(c.col) | 0;
+            const row = Number(c.row) | 0;
+            state.worldMap.cells[worldMapKey(col, row)] = {
+                userId: Number(c.userId) | 0,
+                factoryId: Number(c.factoryId) | 0,
+                username: String(c.username || '')
+            };
+        }
+    } catch {
+        /* ignore */
+    }
+}
+
+function worldDrawFullCanvas() {
+    if (!worldCanvasEl || !worldCanvasWrapEl) return;
+    if (state.activeWorkspace !== 'world') return;
+    worldResizeCanvas();
+    const ctx = worldCanvasEl.getContext('2d');
+    if (!ctx) return;
+    const rect = worldCanvasWrapEl.getBoundingClientRect();
+    const cssW = rect.width;
+    const cssH = rect.height;
+    if (cssW < 8 || cssH < 8) return;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(0, 0, cssW, cssH);
+    const L = worldComputeViewLayout(cssW, cssH);
+    worldViewLayout = L;
+    worldScheduleFetchCells();
+    const uid = state.auth.userId | 0;
+    for (let row = L.minRow; row <= L.maxRow; row++) {
+        for (let col = L.minCol; col <= L.maxCol; col++) {
+            const x0 = L.originX + col * L.stride;
+            const y0 = L.originY + row * L.stride;
+            const k = worldMapKey(col, row);
+            const occ = state.worldMap.cells[k];
+            const light = (col + row) % 2 === 0;
+            ctx.fillStyle = occ ? (occ.userId === uid ? 'rgba(16,185,129,0.25)' : 'rgba(59,130,246,0.2)') : light ? '#334155' : '#2d3b4f';
+            ctx.fillRect(x0, y0, L.cellPx, L.cellPx);
+            ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+            ctx.strokeRect(x0 + 0.5, y0 + 0.5, L.cellPx - 1, L.cellPx - 1);
+            if (occ) {
+                const name = (occ.username || `user ${occ.userId}`).slice(0, 12);
+                const t = `${name}\n#${occ.factoryId}`;
+                ctx.fillStyle = '#e2e8f0';
+                ctx.font = '10px system-ui,sans-serif';
+                ctx.textAlign = 'center';
+                const lines = t.split('\n');
+                const ly = y0 + L.cellPx / 2 - (lines.length * 5) / 2;
+                for (let i = 0; i < lines.length; i++) {
+                    ctx.fillText(lines[i], x0 + L.cellPx / 2, ly + i * 12);
+                }
+            }
+        }
+    }
+}
+
+function worldRenderLoop() {
+    if (state.activeWorkspace !== 'world') {
+        worldRenderRafId = null;
+        return;
+    }
+    try {
+        worldDrawFullCanvas();
+    } catch (err) {
+        console.error('World canvas draw error', err);
+    }
+    worldRenderRafId = requestAnimationFrame(worldRenderLoop);
+}
+
+function worldStartRenderLoop() {
+    if (!worldCanvasEl) return;
+    state.worldMap.lastQueryKey = '';
+    if (worldRenderRafId != null) return;
+    worldRenderRafId = requestAnimationFrame(worldRenderLoop);
+}
+
+function worldStopRenderLoop() {
+    if (worldRenderRafId != null) {
+        cancelAnimationFrame(worldRenderRafId);
+        worldRenderRafId = null;
+    }
+    worldViewLayout = null;
+}
+
+async function worldTryClaimOrOpen(col, row) {
+    if (!state.auth.token) return;
+    const k = worldMapKey(col, row);
+    const occ = state.worldMap.cells[k];
+    if (occ) {
+        if (occ.userId === (state.auth.userId | 0)) {
+            state.auth.activeFactoryId = occ.factoryId;
+            renderActiveFactoryList();
+            setWorkspace('factory');
+        }
+        return;
+    }
+    try {
+        const r = await apiFetch('/api/world/claim', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ col, row })
+        });
+        const payload = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            const err = (payload && payload.error) || (await r.text()) || 'claim failed';
+            setAuthStatus(String(err).slice(0, 120));
+            return;
+        }
+        if (payload && payload.factoryId != null) {
+            state.auth.activeFactoryId = Number(payload.factoryId) | 0;
+        }
+        state.worldMap.cells[k] = {
+            userId: state.auth.userId | 0,
+            factoryId: state.auth.activeFactoryId || 1,
+            username: state.auth.username || ''
+        };
+        if (Array.isArray(payload.factories)) {
+            state.auth.myFactories = payload.factories.map((x) => ({
+                factoryId: Math.max(1, Number(x.factoryId) | 0),
+                worldCol: Number(x.worldCol) | 0,
+                worldRow: Number(x.worldRow) | 0
+            }));
+        } else {
+            await refreshFactoryListFromServer();
+        }
+        renderActiveFactoryList();
+        setWorkspace('factory');
+    } catch (e) {
+        setAuthStatus(e && e.message ? String(e.message).slice(0, 120) : 'claim failed');
+    }
+}
+
+if (worldCanvasEl) {
+    worldCanvasEl.addEventListener('wheel', (e) => {
+        if (state.activeWorkspace !== 'world') return;
+        e.preventDefault();
+        const rect = worldCanvasEl.getBoundingClientRect();
+        const L = worldViewLayout;
+        if (!L) return;
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+        const nextZ = worldClampZoom(state.worldMap.cameraZoom * factor);
+        const half = L.cellPx / (2 * L.stride);
+        const wx = (x - L.originX) / L.stride - half;
+        const wy = (y - L.originY) / L.stride - half;
+        state.worldMap.cameraZoom = nextZ;
+        const after = worldComputeViewLayout(L.cssW, L.cssH);
+        state.worldMap.cameraX = wx - ((x - L.cssW * 0.5) / after.stride);
+        state.worldMap.cameraY = wy - ((y - L.cssH * 0.5) / after.stride);
+    }, { passive: false });
+
+    worldCanvasEl.addEventListener('click', (e) => {
+        if (state.activeWorkspace !== 'world') return;
+        if (worldSuppressNextClick) {
+            worldSuppressNextClick = false;
+            return;
+        }
+        const hit = worldPixelToCell(e.clientX, e.clientY);
+        if (!hit) return;
+        void worldTryClaimOrOpen(hit.col, hit.row);
+    });
+
+    worldCanvasEl.addEventListener('pointerdown', (e) => {
+        if (state.activeWorkspace !== 'world') return;
+        if (e.button !== 0) return;
+        worldCameraPan = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startY: e.clientY,
+            startCamX: state.worldMap.cameraX,
+            startCamY: state.worldMap.cameraY,
+            moved: false
+        };
+        try {
+            worldCanvasEl.setPointerCapture(e.pointerId);
+        } catch (_) {
+            /* ignore */
+        }
+    });
+    worldCanvasEl.addEventListener('pointermove', (e) => {
+        if (!worldCameraPan || worldCameraPan.pointerId !== e.pointerId || !worldViewLayout) return;
+        const dx = e.clientX - worldCameraPan.startX;
+        const dy = e.clientY - worldCameraPan.startY;
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) worldCameraPan.moved = true;
+        const s = worldViewLayout.stride;
+        state.worldMap.cameraX = worldCameraPan.startCamX - dx / s;
+        state.worldMap.cameraY = worldCameraPan.startCamY - dy / s;
+    });
+    worldCanvasEl.addEventListener('pointerup', (e) => {
+        if (worldCameraPan && worldCameraPan.pointerId === e.pointerId) {
+            if (worldCameraPan.moved) worldSuppressNextClick = true;
+            worldCameraPan = null;
+        }
+    });
+    worldCanvasEl.addEventListener('pointercancel', (e) => {
+        if (worldCameraPan && worldCameraPan.pointerId === e.pointerId) {
+            if (worldCameraPan.moved) worldSuppressNextClick = true;
+            worldCameraPan = null;
+        }
+    });
+}
+
 if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && state.auth.token) {
@@ -4873,8 +5261,11 @@ if (typeof document !== 'undefined') {
         }
         if (document.visibilityState === 'visible' && state.activeWorkspace === 'factory') {
             factoryStartRenderLoop();
+        } else if (document.visibilityState === 'visible' && state.activeWorkspace === 'world') {
+            worldStartRenderLoop();
         } else if (document.hidden) {
             factoryStopRenderLoop();
+            worldStopRenderLoop();
         }
     });
 }
@@ -5010,67 +5401,89 @@ function renderFactoryGrid() {
 }
 
 function setWorkspace(which) {
-    if (which === 'factory' && !state.auth.token) {
+    if ((which === 'factory' || which === 'world') && !state.auth.token) {
         setAuthVisible(true);
-        setAuthStatus('Login required for multiplayer factory.');
+        setAuthStatus('Login required for factory and world map.');
         return;
     }
     state.activeWorkspace = which;
     const isLab = which === 'lab';
+    const isWorld = which === 'world';
+    const isFactory = which === 'factory';
     const floatingUpgrades = document.getElementById('floating-factory-upgrades');
     const floatingClear = document.getElementById('floating-clear-workspace');
     const floatingFactoryClear = document.getElementById('floating-clear-factory');
     if (floatingUpgrades) {
-        floatingUpgrades.classList.toggle('hidden', isLab);
+        floatingUpgrades.classList.toggle('hidden', isLab || isWorld);
     }
     if (floatingClear) {
         floatingClear.classList.toggle('hidden', !isLab);
     }
     if (floatingFactoryClear) {
-        floatingFactoryClear.classList.toggle('hidden', isLab);
+        floatingFactoryClear.classList.toggle('hidden', isLab || isWorld);
     }
-    if (tabLabBtn && tabFactoryBtn) {
-        tabLabBtn.classList.toggle('is-active', isLab);
-        tabFactoryBtn.classList.toggle('is-active', !isLab);
-    }
-    if (panelLabEl && panelFactoryEl) {
-        panelLabEl.classList.toggle('hidden', !isLab);
-        panelFactoryEl.classList.toggle('hidden', isLab);
-    }
+    if (tabLabBtn) tabLabBtn.classList.toggle('is-active', isLab);
+    if (tabWorldBtn) tabWorldBtn.classList.toggle('is-active', isWorld);
+    if (tabFactoryBtn) tabFactoryBtn.classList.toggle('is-active', isFactory);
+    if (panelLabEl) panelLabEl.classList.toggle('hidden', !isLab);
+    if (panelWorldEl) panelWorldEl.classList.toggle('hidden', !isWorld);
+    if (panelFactoryEl) panelFactoryEl.classList.toggle('hidden', !isFactory);
     if (sidebarHintLab && sidebarHintFactory) {
         sidebarHintLab.classList.toggle('hidden', !isLab);
         sidebarHintFactory.classList.toggle('hidden', isLab);
     }
-    if (workspaceEl && factoryWorkspaceEl) {
-        workspaceEl.classList.toggle('hidden', !isLab);
-        factoryWorkspaceEl.classList.toggle('hidden', isLab);
-    }
-    if (!isLab) {
-        if (!state.auth.enteringFactory) {
-            state.auth.enteringFactory = true;
-            pullFactoryStateFromServer()
-                .catch((err) => {
-                    console.warn('pullFactoryStateFromServer', err);
-                })
-                .finally(() => {
-                    state.auth.enteringFactory = false;
-                    // Start run window without overwriting server-side factory state.
-                    void startFactoryRunOnServer();
-                    renderFactoryGrid();
-                    startFactoryLoop();
-                    void pullFactoryRuntimeStatus();
-                });
-        } else {
-            renderFactoryGrid();
-            startFactoryLoop();
-            void pullFactoryRuntimeStatus();
-        }
-    } else {
+    if (workspaceEl) workspaceEl.classList.toggle('hidden', !isLab);
+    if (factoryWorkspaceEl) factoryWorkspaceEl.classList.toggle('hidden', !isFactory);
+    if (worldWorkspaceEl) worldWorkspaceEl.classList.toggle('hidden', !isWorld);
+
+    if (isWorld) {
         stopFactoryLoop();
         factoryStopRenderLoop();
         factoryClearBeltLineState();
         setUpgradesModalOpen(false);
+        void refreshFactoryListFromServer();
+        worldStartRenderLoop();
+        return;
     }
+    worldStopRenderLoop();
+
+    if (isFactory) {
+        void refreshFactoryListFromServer().then(() => {
+            if (!state.auth.myFactories.length) {
+                setWorkspace('world');
+                setAuthStatus('Claim a map cell to create your first factory.');
+                return;
+            }
+            if (state.auth.activeFactoryId == null) {
+                state.auth.activeFactoryId = state.auth.myFactories[0].factoryId;
+            }
+            renderActiveFactoryList();
+            if (!state.auth.enteringFactory) {
+                state.auth.enteringFactory = true;
+                pullFactoryStateFromServer()
+                    .catch((err) => {
+                        console.warn('pullFactoryStateFromServer', err);
+                    })
+                    .finally(() => {
+                        state.auth.enteringFactory = false;
+                        void startFactoryRunOnServer();
+                        renderFactoryGrid();
+                        startFactoryLoop();
+                        void pullFactoryRuntimeStatus();
+                    });
+            } else {
+                renderFactoryGrid();
+                startFactoryLoop();
+                void pullFactoryRuntimeStatus();
+            }
+        });
+        return;
+    }
+
+    stopFactoryLoop();
+    factoryStopRenderLoop();
+    factoryClearBeltLineState();
+    setUpgradesModalOpen(false);
 }
 
 // Workspace Logic
@@ -5577,8 +5990,13 @@ if (factoryClearBtn) {
     });
 }
 
-if (tabLabBtn && tabFactoryBtn) {
+if (tabLabBtn) {
     tabLabBtn.addEventListener('click', () => setWorkspace('lab'));
+}
+if (tabWorldBtn) {
+    tabWorldBtn.addEventListener('click', () => setWorkspace('world'));
+}
+if (tabFactoryBtn) {
     tabFactoryBtn.addEventListener('click', () => setWorkspace('factory'));
 }
 
@@ -5589,8 +6007,13 @@ if (toggleInventoryBtn && inventoryPanelEl) {
         inventoryPanelEl.classList.toggle('hidden');
         const open = !inventoryPanelEl.classList.contains('hidden');
         toggleInventoryBtn.setAttribute('aria-expanded', String(open));
-        if (open && state.auth.token) {
-            void apiFetch('/api/inventory/open', { method: 'POST' })
+        if (open && state.auth.token && state.auth.activeFactoryId != null && state.auth.activeFactoryId >= 1) {
+            const fid = state.auth.activeFactoryId;
+            void apiFetch('/api/inventory/open', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ factoryId: fid })
+            })
                 .then(async (r) => {
                     if (!r.ok) return;
                     const payload = await r.json();
@@ -5603,6 +6026,9 @@ if (toggleInventoryBtn && inventoryPanelEl) {
             window.dispatchEvent(new Event('resize'));
             if (state.activeWorkspace === 'factory') {
                 factoryResizeMainCanvas();
+            }
+            if (state.activeWorkspace === 'world') {
+                worldResizeCanvas();
             }
         });
     });
@@ -6512,12 +6938,22 @@ if (authLogoutBtn) {
         const oldToken = state.auth.token;
         state.auth.token = '';
         state.auth.username = '';
+        state.auth.userId = 0;
+        state.auth.activeFactoryId = null;
+        state.auth.myFactories = [];
+        state.worldMap.cells = {};
+        state.worldMap.lastQueryKey = '';
+        worldStopRenderLoop();
+        factoryStopRenderLoop();
+        stopFactoryLoop();
+        setWorkspace('lab');
         state.pendingDiscoveryNotices = [];
         state.deferredDiscoveries = {};
         state.pendingCombination = null;
         state.playerInventory = {};
         setDeferredDiscoveryPrompt(null);
         updateFloatingDiscoveryAlert(false);
+        renderActiveFactoryList();
         applyLoggedInUi();
         stopPlayerPingLoop();
         stopFactoryRuntimeSyncLoop();
@@ -6586,10 +7022,12 @@ async function initAuthThenBoot() {
             if (r.ok) {
                 const payload = await r.json();
                 if (payload && payload.username) state.auth.username = String(payload.username);
+                if (payload && typeof payload.userId === 'number') state.auth.userId = Number(payload.userId) | 0;
                 if (payload && payload.inventory) applyServerInventorySnapshot(payload.inventory);
                 applyLoggedInUi();
                 startPlayerPingLoop();
                 startFactoryRuntimeSyncLoop();
+                await refreshFactoryListFromServer();
                 setAuthVisible(false);
             } else {
                 state.auth.token = '';
