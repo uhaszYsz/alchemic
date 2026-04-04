@@ -402,7 +402,8 @@ export function simulateFactoryStep(state, deps) {
     const claimedFrom = new Set();
     const movesTT = [];
 
-    const MAX_BELT_WAVES = 20;
+    /** One belt-resolution wave per sim tick so items advance at most one transporter/sorter hop per tick. */
+    const MAX_BELT_WAVES = 1;
     let cursorMap = state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : {};
 
     for (let beltWave = 0; beltWave < MAX_BELT_WAVES; beltWave++) {
@@ -492,11 +493,18 @@ export function simulateFactoryStep(state, deps) {
             deposits.push(dep);
         }
 
+        /**
+         * Cells that received a belt item this wave cannot forward in the same wave (avoids multi-hop
+         * when candidate sort order runs upstream→downstream in one pass).
+         */
+        const receivedThisWave = new Set();
+
         movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
         for (let pass = 0; pass < movesTTCandidates.length; pass++) {
             let progressed = false;
             for (const m of movesTTCandidates) {
                 if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
+                if (receivedThisWave.has(m.from)) continue;
                 const acceptedFrom = acceptedFromByDest[m.to];
                 if (acceptedFrom && acceptedFrom !== m.from) continue;
                 if (work[m.to]) continue;
@@ -505,6 +513,7 @@ export function simulateFactoryStep(state, deps) {
                 claimedFrom.add(m.from);
                 delete work[m.from];
                 work[m.to] = m.itemId;
+                receivedThisWave.add(m.to);
                 movesTT.push(m);
                 progressed = true;
                 if (state.placements[m.from] === 'splitter' && state._splitterOptLen && state._splitterChosenIdx) {
