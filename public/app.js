@@ -4343,11 +4343,11 @@ function factoryDrawItemSlides(ctx, L, sc, now) {
             const sz = Math.max(8, 19 * sc);
             ctx.drawImage(iconImg, x - sz / 2, y - sz / 2, sz, sz);
         } else {
-            const icon = emojiForItemId(itemId);
-            if (!icon) {
-                ctx.restore();
-                continue;
-            }
+            const icon =
+                emojiForItemId(itemId) ||
+                factoryLibraryStubForId(itemId).emoji ||
+                String(itemId).slice(0, 1) ||
+                '·';
             const fsz = Math.max(6, 20 * sc);
             ctx.font = `${fsz}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
             ctx.textAlign = 'center';
@@ -4718,8 +4718,10 @@ function factoryClearBeltLineState() {
  * @param {number} w
  * @param {number} h
  * @param {number} sc scale from cell size
+ * @param {number} [drawNow] single frame clock; must match {@link factoryDrawItemSlides} to avoid carry/slide desync
  */
-function factoryDrawCellContent(ctx, col, row, w, h, sc) {
+function factoryDrawCellContent(ctx, col, row, w, h, sc, drawNow) {
+    const now = Number.isFinite(drawNow) ? drawNow : performance.now();
     const key = factoryPlacementKey(col, row);
     const placement = state.factory.placements[key];
     const gatherHubId = factoryFixedGatheringHubMaterialId(col, row) || '';
@@ -4729,9 +4731,12 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
     /** Green tint: extractable cells and/or fixed hub corners. */
     const hasRes = Boolean(resId) || Boolean(gatherHubId);
     const carryId = state.factory.cellItems[key];
-    const carryIcon = carryId ? emojiForItemId(carryId) : '';
+    const carryIconRaw = carryId ? emojiForItemId(carryId) : '';
     const carryImg = carryId ? factoryGetLoadedIconImage(carryId) : null;
-    const slideP = factoryItemSlideProgress(key, performance.now());
+    const carryIcon =
+        carryIconRaw ||
+        (carryId ? factoryLibraryStubForId(carryId).emoji || String(carryId).slice(0, 1) || '·' : '');
+    const slideP = factoryItemSlideProgress(key, now);
     const hideCarryForSlide = slideP !== null && slideP < 1;
 
     const midX = w / 2;
@@ -5075,7 +5080,7 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc) {
         ctx.shadowBlur = 10 * sc;
         ctx.fillText('!', midX, midY);
         ctx.shadowBlur = 0;
-    } else if ((carryImg || carryIcon) && placement !== 'storage' && !hideCarryForSlide) {
+    } else if (carryId && placement !== 'storage' && !hideCarryForSlide) {
         ctx.shadowColor = 'rgba(0,0,0,0.45)';
         ctx.shadowBlur = 4 * sc;
         ctx.shadowOffsetY = 1;
@@ -5184,20 +5189,21 @@ function factoryDrawFullCanvas() {
     ctx.lineWidth = 1;
     ctx.strokeRect(legacyX - 0.5, legacyY - 0.5, legacyGridW + 1, legacyGridH + 1);
 
+    const drawNow = performance.now();
     for (let row = L.minRow; row <= L.maxRow; row++) {
         for (let col = L.minCol; col <= L.maxCol; col++) {
             const x0 = L.originX + col * L.stride;
             const y0 = L.originY + row * L.stride;
             ctx.save();
             ctx.translate(x0, y0);
-            factoryDrawCellContent(ctx, col, row, L.cellPx, L.cellPx, sc);
+            factoryDrawCellContent(ctx, col, row, L.cellPx, L.cellPx, sc, drawNow);
             ctx.restore();
         }
     }
 
     factoryDrawBeltDragPreview(ctx, L, sc);
 
-    const now = performance.now();
+    const now = drawNow;
     factoryDrawItemSlides(ctx, L, sc, now);
 
     for (const k of Object.keys(state.factory.cellRejectFlashUntil)) {
