@@ -326,6 +326,11 @@ function factoryTransporterDir(state, key) {
     return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
 }
 
+function factorySplitterDir(state, key) {
+    const d = state.splitterDirs[key];
+    return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
+}
+
 function factorySorterDir(state, key) {
     const d = state.sorterDirs[key];
     return d === 0 || d === 1 || d === 2 || d === 3 ? d : 0;
@@ -520,6 +525,7 @@ function factoryStep(state, userId = 0) {
         inBounds: (col, row) => Number.isFinite(col) && Number.isFinite(row),
         getResourceId: (col, row) => factoryCellResourceId(state, col, row),
         getTransporterDir: (key) => factoryTransporterDir(state, key),
+        getSplitterDir: (key) => factorySplitterDir(state, key),
         getSorterDir: (key) => factorySorterDir(state, key),
         getBridgeDir: (key) => factoryBridgeDir(state, key),
         getCombinerDir: (key) => factoryCombinerDir(state, key),

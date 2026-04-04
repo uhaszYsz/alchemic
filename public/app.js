@@ -4352,8 +4352,11 @@ function factoryDrawItemSlides(ctx, L, sc, now) {
             ctx.font = `${fsz}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#f8fafc';
+            ctx.fillStyle = '#0f172a';
+            ctx.shadowColor = 'rgba(255,255,255,0.75)';
+            ctx.shadowBlur = 2.5 * sc;
             ctx.fillText(icon, x, y);
+            ctx.shadowBlur = 0;
         }
         ctx.restore();
     }
@@ -4737,7 +4740,13 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc, drawNow) {
         carryIconRaw ||
         (carryId ? factoryLibraryStubForId(carryId).emoji || String(carryId).slice(0, 1) || '·' : '');
     const slideP = factoryItemSlideProgress(key, now);
-    const hideCarryForSlide = slideP !== null && slideP < 1;
+    /** Belt cells: always draw carry in-cell; hiding during slides + overlay desync made items vanish. */
+    const beltLikePlacement =
+        placement === 'transporter' ||
+        placement === 'bridge' ||
+        placement === 'splitter' ||
+        placement === 'sorter';
+    const hideCarryForSlide = !beltLikePlacement && slideP !== null && slideP < 1;
 
     const midX = w / 2;
     const midY = h / 2;
@@ -5091,7 +5100,8 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc, drawNow) {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.font = fs(20);
-            ctx.fillStyle = '#fafaf9';
+            // Light checkerboard under belts: near-white glyphs disappear; sorter body stays dark.
+            ctx.fillStyle = beltLikePlacement && placement !== 'sorter' ? '#0f172a' : '#fafaf9';
             ctx.fillText(carryIcon, midX, midY);
         }
         ctx.shadowBlur = 0;
