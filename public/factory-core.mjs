@@ -139,6 +139,43 @@ function refreshBeltMergeConflicts(state, getTransporterDir, getSplitterDir, spl
 }
 
 /**
+ * True if the belt at `beltKey` would send its next step into `targetKey` (e.g. transporter arrow aims at target).
+ */
+function beltOutputLeadsToCell(
+    state,
+    beltKey,
+    targetKey,
+    getTransporterDir,
+    getSorterDir,
+    getBridgeDir,
+    getSplitterDir
+) {
+    const pl = state.placements[beltKey];
+    const c = factoryKeyToColRow(beltKey);
+    if (!Number.isFinite(c.col) || !Number.isFinite(c.row)) return false;
+    if (pl === 'transporter') {
+        const nb = factoryNeighborColRow(c.col, c.row, getTransporterDir(beltKey));
+        return factoryPlacementKey(nb.col, nb.row) === targetKey;
+    }
+    if (pl === 'sorter') {
+        const nb = factoryNeighborColRow(c.col, c.row, getSorterDir(beltKey));
+        return factoryPlacementKey(nb.col, nb.row) === targetKey;
+    }
+    if (pl === 'splitter') {
+        const nb = factoryNeighborColRow(c.col, c.row, getSplitterDir(beltKey));
+        return factoryPlacementKey(nb.col, nb.row) === targetKey;
+    }
+    if (pl === 'bridge') {
+        const d = getBridgeDir(beltKey);
+        const n1 = factoryNeighborColRow(c.col, c.row, d);
+        if (factoryPlacementKey(n1.col, n1.row) === targetKey) return true;
+        const n2 = factoryNeighborColRow(n1.col, n1.row, d);
+        return factoryPlacementKey(n2.col, n2.row) === targetKey;
+    }
+    return false;
+}
+
+/**
  * @param {Record<string, string>} outPlanned
  * @returns {number} number of TT moves added
  */
@@ -147,6 +184,9 @@ function emitSplitterOutbound(
     work,
     spawnedThisTick,
     inBounds,
+    getTransporterDir,
+    getSorterDir,
+    getBridgeDir,
     getSplitterDir,
     movesTTCandidates,
     deposits,
@@ -194,7 +234,22 @@ function emitSplitterOutbound(
                 destPl === 'bridge' ||
                 destPl === 'splitter'
             ) {
-                if (!work[destKey]) options.push({ kind: 'tt', dir: d, destKey });
+                if (!work[destKey]) {
+                    if (
+                        beltOutputLeadsToCell(
+                            state,
+                            destKey,
+                            key,
+                            getTransporterDir,
+                            getSorterDir,
+                            getBridgeDir,
+                            getSplitterDir
+                        )
+                    ) {
+                        continue;
+                    }
+                    options.push({ kind: 'tt', dir: d, destKey });
+                }
             }
         }
         if (!options.length) continue;
@@ -379,6 +434,9 @@ export function simulateFactoryStep(state, deps) {
             work,
             spawnedThisTick,
             inBounds,
+            getTransporterDir,
+            getSorterDir,
+            getBridgeDir,
             getSplitterDir,
             movesTTCandidates,
             depositsWave,
