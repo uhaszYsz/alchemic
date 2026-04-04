@@ -3169,7 +3169,11 @@ function factoryRunSimTick(nowTick) {
     factoryLastSimTickAt = slideT;
     const slideDur = Math.max(16, Math.round(Math.min(targetMs * 2.25, Math.max(targetMs * 0.8, elapsedMs))));
     for (const k of Object.keys(state.factory.itemSlides)) {
-        if (!state.factory.cellItems[k]) delete state.factory.itemSlides[k];
+        const s = state.factory.itemSlides[k];
+        if (!s) continue;
+        if (state.factory.cellItems[k]) continue;
+        if (typeof s.slideItemId === 'string' && s.slideItemId) continue;
+        delete state.factory.itemSlides[k];
     }
     const out = simulateFactoryStep(state.factory, {
         inBounds: (col, row) => factoryInBounds(col, row),
@@ -3188,6 +3192,12 @@ function factoryRunSimTick(nowTick) {
     if (isInventoryPanelOpen()) {
         addItemsToPlayerInventory(out && out.invDelta && typeof out.invDelta === 'object' ? out.invDelta : {});
     }
+    /** Combine clears combiner slides; run before intake slides so the second-item path onto the combiner is kept. */
+    for (const c of out.combined || []) {
+        if (!c || !c.combinerKey || !c.outKey) continue;
+        factoryClearSlidesTouchingKey(c.combinerKey);
+        factoryRecordItemSlide(c.outKey, c.combinerKey, slideDur, slideT);
+    }
     const moveLike = [
         ...(out.spawns || []),
         ...(out.sorterPulls || []),
@@ -3199,10 +3209,9 @@ function factoryRunSimTick(nowTick) {
         if (!mv || !mv.from || !mv.to) continue;
         factoryRecordItemSlide(mv.to, mv.from, slideDur, slideT);
     }
-    for (const c of out.combined || []) {
-        if (!c || !c.combinerKey || !c.outKey) continue;
-        factoryClearSlidesTouchingKey(c.combinerKey);
-        factoryRecordItemSlide(c.outKey, c.combinerKey, slideDur, slideT);
+    for (const mv of out.combinerIntakeMoves || []) {
+        if (!mv || !mv.from || !mv.to || !mv.itemId) continue;
+        factoryRecordItemSlide(mv.to, mv.from, slideDur, slideT, mv.itemId);
     }
 }
 
@@ -4256,9 +4265,12 @@ function factoryCombinerDir(key) {
  * @param {string} fromKey
  * @param {number} durMs
  * @param {number} startT performance.now()
+ * @param {string} [slideItemId] sprite when `cellItems[toKey]` is empty (e.g. second item into combiner same tick as merge)
  */
-function factoryRecordItemSlide(toKey, fromKey, durMs, startT) {
-    state.factory.itemSlides[toKey] = { fromKey, startT, durMs };
+function factoryRecordItemSlide(toKey, fromKey, durMs, startT, slideItemId) {
+    const rec = { fromKey, startT, durMs };
+    if (typeof slideItemId === 'string' && slideItemId) rec.slideItemId = slideItemId;
+    state.factory.itemSlides[toKey] = rec;
 }
 
 /** @param {string} key */
@@ -4352,7 +4364,9 @@ function factoryDrawItemSlides(ctx, L, sc, now) {
     for (const toKey of Object.keys(slides)) {
         const s = slides[toKey];
         if (!s) continue;
-        const itemId = state.factory.cellItems[toKey];
+        const itemId =
+            state.factory.cellItems[toKey] ||
+            (typeof s.slideItemId === 'string' ? s.slideItemId : '');
         if (!itemId) {
             delete slides[toKey];
             continue;

@@ -636,6 +636,8 @@ export function simulateFactoryStep(state, deps) {
     }
 
     const combined = [];
+    /** Second-item runs into an occupied combiner; used client-side for slide animation (combiner cell often has no cellItems after merge). */
+    const combinerIntakeMoves = [];
     combinerFeeds.sort((a, b) => a.from.localeCompare(b.from));
     const combinerDestClaimed = new Set();
     const combinerOutClaimed = new Set();
@@ -667,6 +669,7 @@ export function simulateFactoryStep(state, deps) {
             claimedFrom.add(f.from);
             claimedDest.add(outKey);
             combinerOutClaimed.add(outKey);
+            combinerIntakeMoves.push({ from: f.from, to: f.to, itemId: f.incoming });
             delete work[f.from];
             delete work[f.to];
             work[outKey] = resultId;
@@ -674,6 +677,7 @@ export function simulateFactoryStep(state, deps) {
         } else {
             combinerDestClaimed.add(f.to);
             claimedFrom.add(f.from);
+            combinerIntakeMoves.push({ from: f.from, to: f.to, itemId: f.incoming });
             delete work[f.from];
             delete work[f.to];
             state.combinerDiscovery[f.to] = { a: existing, b: f.incoming, comboKey };
@@ -687,5 +691,15 @@ export function simulateFactoryStep(state, deps) {
         next[k] = v;
     }
     state.cellItems = next;
-    return { invDelta, deposits, combined, spawns, sorterPulls, bridgeMoves, movesTT, movesToEmptyCombiner };
+    return {
+        invDelta,
+        deposits,
+        combined,
+        spawns,
+        sorterPulls,
+        bridgeMoves,
+        movesTT,
+        movesToEmptyCombiner,
+        combinerIntakeMoves
+    };
 }
