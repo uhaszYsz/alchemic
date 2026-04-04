@@ -379,7 +379,7 @@
                 <canvas id="world-canvas" class="absolute inset-0 block h-full w-full cursor-pointer touch-none" width="400" height="300" aria-label="World map"></canvas>
             </div>
             <p id="world-map-hint" class="shrink-0 text-[10px] text-slate-500 px-2 py-1 bg-slate-900/90 border-t border-slate-700 text-center">
-                Home factory is not on the map. After you place a building somewhere, empty cells here add factory #2+.
+                Home is not on the map. Empty cells: open and place a building to claim. Your factories list is in the panel below.
             </p>
         </div>
     </div>
@@ -422,10 +422,45 @@
             </div>
         </div>
 
-        <div id="panel-world" class="hidden flex-1 flex flex-col min-h-0 bottom-tools-scroll overflow-y-auto p-3">
-            <p class="text-xs text-slate-400 mb-2">Pan and zoom the map. Tap an empty cell to create a factory there. Tap your own cell to open that factory.</p>
-            <p class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Your factories</p>
-            <div id="active-factory-list" class="text-xs text-slate-300 space-y-1 min-h-[2rem]"></div>
+        <div id="panel-world" class="hidden flex-1 flex flex-col min-h-0 min-w-0">
+            <p id="world-panel-hint" class="shrink-0 text-xs text-slate-400 px-3 pt-3 pb-2 leading-snug">
+                Pan and zoom the map. Tap an empty cell to plan a factory; your first building claims the tile. Tap your own tile to open it.
+            </p>
+            <div class="shrink-0 px-2 pb-2 sm:px-3" role="tablist" aria-label="Map tools">
+                <div class="grid grid-cols-2 gap-1 p-1 rounded-xl bg-slate-950/90 border border-slate-600">
+                    <button
+                        type="button"
+                        id="world-subtab-factories"
+                        role="tab"
+                        aria-selected="true"
+                        class="world-subtab-btn min-h-[44px] px-3 py-2.5 rounded-lg text-sm font-medium text-center touch-manipulation transition border border-transparent text-amber-50 hover:bg-slate-800/80 bg-amber-600/20 ring-1 ring-amber-500/45 border-amber-500/35"
+                    >
+                        Factories
+                    </button>
+                    <button
+                        type="button"
+                        id="world-subtab-army"
+                        role="tab"
+                        aria-selected="false"
+                        class="world-subtab-btn min-h-[44px] px-3 py-2.5 rounded-lg text-sm font-medium text-center touch-manipulation transition border border-transparent text-slate-300 hover:bg-slate-800/80"
+                    >
+                        Army
+                    </button>
+                </div>
+            </div>
+            <div class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-2 pb-3 sm:px-3 touch-pan-y bottom-tools-scroll">
+                <div id="world-panel-factories" class="space-y-2">
+                    <p class="text-[10px] uppercase tracking-wider text-slate-500">Your factories</p>
+                    <div id="active-factory-list" class="flex flex-col gap-2 min-h-[2rem]"></div>
+                </div>
+                <div id="world-panel-army" class="hidden space-y-2">
+                    <p class="text-[10px] uppercase tracking-wider text-slate-500">Army in storage</p>
+                    <div id="world-army-list" class="flex flex-col gap-2"></div>
+                    <p id="world-army-empty" class="hidden text-sm text-slate-500 text-center py-8 px-2 leading-relaxed">
+                        No army-type items in storage. Items tagged ArmyAir, ArmyGround, or ArmyWater appear here when you have them.
+                    </p>
+                </div>
+            </div>
         </div>
 
         <div id="panel-factory" class="hidden flex-1 flex flex-col min-h-0 bottom-tools-scroll overflow-y-auto">

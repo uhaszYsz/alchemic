@@ -10,6 +10,14 @@ const MIN_FACTORY_LOOP_MS = 33;
 /** Max Size +1 presses; each adds one row/col on every side (grid side = BASE + 2×level) */
 const MAX_FACTORY_SIZE_LEVEL = 10;
 
+/** Item `type` values treated as army units (see db ITEM_TYPE_VALUES). */
+const ARMY_ITEM_TYPES = new Set(['ArmyAir', 'ArmyGround', 'ArmyWater']);
+
+/** @param {string | undefined} t */
+function itemIsArmyType(t) {
+    return typeof t === 'string' && ARMY_ITEM_TYPES.has(t);
+}
+
 const state = {
     library: [],
     recipes: {},
@@ -26,6 +34,8 @@ const state = {
     discoveryNameColor: '',
     /** 'lab' | 'factory' | 'world' */
     activeWorkspace: 'lab',
+    /** Bottom tools sub-tab when Map workspace: 'factories' | 'army' */
+    worldToolsTab: 'factories',
     /** Crafted / factory output counts; separate from the discovery library. */
     playerInventory: {},
     /** Server runtime status for this user's factory. */
@@ -391,9 +401,15 @@ async function reloadCatalogFromApi() {
                 it.iconPath = iconPath;
                 syncActiveElementsIconPath(it.id, iconPath);
             }
+            if (d && typeof d.type === 'string' && d.type.trim()) {
+                it.type = d.type.trim();
+            } else if (d && (d.type == null || d.type === '')) {
+                delete it.type;
+            }
         }
         recomputeAllTiers();
         renderLibrary();
+        if (state.activeWorkspace === 'world') renderWorldPanelArmy();
     } catch (e) {
         console.warn('reloadCatalogFromApi', e);
     }
@@ -429,6 +445,7 @@ function getClientIconDisplaySrc(rawSrc) {
                 // Trigger refresh so existing DOM/canvas starts using processed icon.
                 renderCanvas();
                 renderLibrary();
+                if (state.activeWorkspace === 'world') renderWorldPanelArmy();
                 if (state.activeWorkspace === 'factory') factoryStartRenderLoop();
             })
             .catch(() => {})
@@ -981,6 +998,7 @@ function renderPlayerInventory() {
             overflowEl.classList.add('hidden');
         }
     }
+    renderWorldPanelArmy();
 }
 
 /** Split "🌍 Earth" → { icon: "🌍", text: "Earth" } (first space separates emoji from name) */
@@ -1114,7 +1132,7 @@ function itemsMapToState(items) {
     const recipesRaw = {};
     for (const [id, def] of Object.entries(items)) {
         if (!def || typeof def.name !== 'string' || typeof def.emoji !== 'string') continue;
-        const row = /** @type {{ id: string, emoji: string, name: string, tier: number, iconPath?: string, nameColor?: string }} */ ({
+        const row = /** @type {{ id: string, emoji: string, name: string, tier: number, iconPath?: string, nameColor?: string, type?: string }} */ ({
             id,
             emoji: def.emoji,
             name: def.name,
@@ -1124,6 +1142,9 @@ function itemsMapToState(items) {
         if (nameColor) row.nameColor = nameColor;
         if (typeof def.iconPath === 'string' && def.iconPath.trim()) {
             row.iconPath = def.iconPath.trim();
+        }
+        if (typeof def.type === 'string' && def.type.trim()) {
+            row.type = def.type.trim();
         }
         library.push(row);
         if (typeof def.a === 'string' && typeof def.b === 'string') {
@@ -2303,6 +2324,8 @@ const worldCanvasWrapEl = document.getElementById('world-canvas-wrap');
 const worldCanvasEl = /** @type {HTMLCanvasElement | null} */ (document.getElementById('world-canvas'));
 const tabLabBtn = document.getElementById('tab-lab');
 const tabWorldBtn = document.getElementById('tab-world');
+const worldSubtabFactoriesBtn = document.getElementById('world-subtab-factories');
+const worldSubtabArmyBtn = document.getElementById('world-subtab-army');
 const tabFactoryBtn = document.getElementById('tab-factory');
 const panelLabEl = document.getElementById('panel-lab');
 const panelWorldEl = document.getElementById('panel-world');
@@ -2868,6 +2891,123 @@ async function refreshFactoryListFromServer() {
     }
 }
 
+function setWorldPanelSubtab(tab) {
+    state.worldToolsTab = tab === 'army' ? 'army' : 'factories';
+    syncWorldPanelSubtabUi();
+}
+
+function syncWorldPanelSubtabUi() {
+    const facPanel = document.getElementById('world-panel-factories');
+    const armyPanel = document.getElementById('world-panel-army');
+    const t = state.worldToolsTab === 'army' ? 'army' : 'factories';
+    if (facPanel) facPanel.classList.toggle('hidden', t !== 'factories');
+    if (armyPanel) armyPanel.classList.toggle('hidden', t !== 'army');
+    const applyTabBtn = (btn, on) => {
+        if (!btn) return;
+        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        btn.classList.toggle('bg-amber-600/20', on);
+        btn.classList.toggle('text-amber-50', on);
+        btn.classList.toggle('ring-1', on);
+        btn.classList.toggle('ring-amber-500/45', on);
+        btn.classList.toggle('border-amber-500/35', on);
+        btn.classList.toggle('text-slate-300', !on);
+    };
+    applyTabBtn(worldSubtabFactoriesBtn, t === 'factories');
+    applyTabBtn(worldSubtabArmyBtn, t === 'army');
+}
+
+function renderWorldPanelArmy() {
+    const listEl = document.getElementById('world-army-list');
+    const emptyEl = document.getElementById('world-army-empty');
+    if (!listEl) return;
+    const rows = [];
+    for (const [id, count] of Object.entries(state.playerInventory)) {
+        const n = Number(count) | 0;
+        if (n <= 0) continue;
+        const lib = state.library.find((e) => e.id === id);
+        const fromMap =
+            cachedBaseItemsMap && typeof cachedBaseItemsMap === 'object' ? cachedBaseItemsMap[id] : null;
+        const typ =
+            (lib && lib.type) ||
+            (fromMap && typeof fromMap.type === 'string' ? fromMap.type.trim() : '') ||
+            '';
+        if (!itemIsArmyType(typ)) continue;
+        rows.push({ id, count: n, type: typ, lib });
+    }
+    rows.sort((a, b) => {
+        const c = a.type.localeCompare(b.type);
+        if (c !== 0) return c;
+        const na = a.lib && typeof a.lib.name === 'string' ? a.lib.name : a.id;
+        const nb = b.lib && typeof b.lib.name === 'string' ? b.lib.name : b.id;
+        return String(na).localeCompare(String(nb));
+    });
+    listEl.innerHTML = '';
+    if (!rows.length) {
+        if (emptyEl) emptyEl.classList.remove('hidden');
+        return;
+    }
+    if (emptyEl) emptyEl.classList.add('hidden');
+    for (const r of rows) {
+        const lib = r.lib;
+        const name =
+            lib && typeof lib.name === 'string' ? splitLabel(lib.name).text : r.id;
+        const emoji = lib
+            ? typeof lib.emoji === 'string'
+                ? lib.emoji
+                : splitLabel(lib.name).icon
+            : '·';
+        const card = document.createElement('div');
+        card.className =
+            'flex items-center gap-3 min-h-[52px] px-3 py-2.5 rounded-xl border border-slate-600 bg-slate-800/90 shadow-sm';
+        const iconWrap = document.createElement('div');
+        iconWrap.className =
+            'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-slate-900/80 border border-slate-700 overflow-hidden';
+        const iconSrc = lib ? iconSrcForItem(lib) : null;
+        if (iconSrc) {
+            const img = document.createElement('img');
+            img.className = 'h-9 w-9 object-contain select-none';
+            img.src = iconSrc;
+            img.alt = '';
+            img.decoding = 'async';
+            iconWrap.appendChild(img);
+        } else {
+            iconWrap.innerHTML = `<span class="text-xl leading-none select-none" aria-hidden="true">${escapeHtml(
+                emoji
+            )}</span>`;
+        }
+        const textCol = document.createElement('div');
+        textCol.className = 'min-w-0 flex-1';
+        const title = document.createElement('div');
+        title.className = 'text-sm font-medium text-slate-100 leading-snug truncate';
+        title.textContent = name;
+        const meta = document.createElement('div');
+        meta.className = 'mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500';
+        const typeSpan = document.createElement('span');
+        typeSpan.className =
+            'inline-flex items-center rounded px-1.5 py-0.5 bg-rose-950/50 text-rose-200/95 border border-rose-800/50';
+        typeSpan.textContent = r.type;
+        const qty = document.createElement('span');
+        qty.className = 'tabular-nums text-slate-400 font-medium';
+        qty.textContent = `×${r.count}`;
+        meta.appendChild(typeSpan);
+        meta.appendChild(qty);
+        textCol.appendChild(title);
+        textCol.appendChild(meta);
+        card.appendChild(iconWrap);
+        card.appendChild(textCol);
+        listEl.appendChild(card);
+    }
+}
+
+/** @param {string} s */
+function escapeHtml(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
 function renderActiveFactoryList() {
     const el = document.getElementById('active-factory-list');
     if (!el) return;
@@ -2881,13 +3021,18 @@ function renderActiveFactoryList() {
         const row = document.createElement('button');
         row.type = 'button';
         row.className =
-            'w-full text-left px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-800/80 hover:bg-slate-700 text-slate-200';
+            'w-full text-left flex flex-col items-stretch justify-center gap-0.5 min-h-[52px] px-3 py-3 rounded-xl border border-slate-600 bg-slate-800/90 hover:bg-slate-700/90 active:scale-[0.99] text-slate-200 touch-manipulation transition shadow-sm';
         const on = state.auth.activeFactoryId === f.factoryId;
-        if (on) row.classList.add('ring-1', 'ring-amber-500');
+        if (on) row.classList.add('ring-2', 'ring-amber-500', 'border-amber-600/50', 'bg-slate-800');
         const onMap = f.worldCol != null && f.worldRow != null;
-        row.textContent = onMap
-            ? `Factory #${f.factoryId} — map (${f.worldCol}, ${f.worldRow})`
-            : `Factory #${f.factoryId} — home (not on map)`;
+        const title = document.createElement('span');
+        title.className = 'text-sm font-semibold text-slate-100 leading-tight';
+        title.textContent = onMap ? `Factory #${f.factoryId}` : `Factory #${f.factoryId} · Home`;
+        const sub = document.createElement('span');
+        sub.className = 'text-xs text-slate-500 leading-tight';
+        sub.textContent = onMap ? `Map tile ${f.worldCol}, ${f.worldRow}` : 'Not on world map';
+        row.appendChild(title);
+        row.appendChild(sub);
         row.addEventListener('click', () => {
             state.auth.worldMapUnclaimedEdit = null;
             state.auth.activeFactoryId = f.factoryId;
@@ -5503,6 +5648,8 @@ function setWorkspace(which) {
         factoryStopRenderLoop();
         factoryClearBeltLineState();
         setUpgradesModalOpen(false);
+        syncWorldPanelSubtabUi();
+        renderWorldPanelArmy();
         void refreshFactoryListFromServer();
         worldStartRenderLoop();
         return;
@@ -6064,6 +6211,12 @@ if (tabLabBtn) {
 }
 if (tabWorldBtn) {
     tabWorldBtn.addEventListener('click', () => setWorkspace('world'));
+}
+if (worldSubtabFactoriesBtn) {
+    worldSubtabFactoriesBtn.addEventListener('click', () => setWorldPanelSubtab('factories'));
+}
+if (worldSubtabArmyBtn) {
+    worldSubtabArmyBtn.addEventListener('click', () => setWorldPanelSubtab('army'));
 }
 if (tabFactoryBtn) {
     tabFactoryBtn.addEventListener('click', () => setWorkspace('factory'));
