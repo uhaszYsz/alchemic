@@ -4304,19 +4304,52 @@ function factoryEaseInOutQuad(t) {
 
 /**
  * @param {CanvasRenderingContext2D} ctx
+ * @param {number} sc
+ * @param {string} itemId
+ * @param {number} x
+ * @param {number} y
+ */
+function factoryDrawCarryIconWorld(ctx, sc, itemId, x, y) {
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.55)';
+    ctx.shadowBlur = 5 * sc;
+    ctx.shadowOffsetY = 1;
+    const iconImg = factoryGetLoadedIconImage(itemId);
+    if (iconImg) {
+        const sz = Math.max(8, 19 * sc);
+        ctx.drawImage(iconImg, x - sz / 2, y - sz / 2, sz, sz);
+    } else {
+        const icon =
+            emojiForItemId(itemId) ||
+            factoryLibraryStubForId(itemId).emoji ||
+            String(itemId).slice(0, 1) ||
+            '·';
+        const fsz = Math.max(6, 20 * sc);
+        ctx.font = `${fsz}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#0f172a';
+        ctx.shadowColor = 'rgba(255,255,255,0.75)';
+        ctx.shadowBlur = 2.5 * sc;
+        ctx.fillText(icon, x, y);
+        ctx.shadowBlur = 0;
+    }
+    ctx.restore();
+}
+
+/**
+ * Belt/sorter items: drawn here only (not inside cell tiles). Active slides + idle centered icons.
+ * @param {CanvasRenderingContext2D} ctx
  * @param {{ cellPx: number, gap: number, originX: number, originY: number }} L
  * @param {number} sc
  * @param {number} now
  */
 function factoryDrawItemSlides(ctx, L, sc, now) {
     const slides = state.factory.itemSlides;
-    const keys = Object.keys(slides);
-    if (keys.length === 0) return;
-
     const cr = { col: 0, row: 0 };
     const fr = { col: 0, row: 0 };
 
-    for (const toKey of keys) {
+    for (const toKey of Object.keys(slides)) {
         const s = slides[toKey];
         if (!s) continue;
         const itemId = state.factory.cellItems[toKey];
@@ -4340,31 +4373,31 @@ function factoryDrawItemSlides(ctx, L, sc, now) {
         const toPt = factoryCellCenterCss(cr.col, cr.row, L);
         const x = fromPt.x + (toPt.x - fromPt.x) * p;
         const y = fromPt.y + (toPt.y - fromPt.y) * p;
-        ctx.save();
-        ctx.shadowColor = 'rgba(0,0,0,0.55)';
-        ctx.shadowBlur = 5 * sc;
-        ctx.shadowOffsetY = 1;
-        const iconImg = factoryGetLoadedIconImage(itemId);
-        if (iconImg) {
-            const sz = Math.max(8, 19 * sc);
-            ctx.drawImage(iconImg, x - sz / 2, y - sz / 2, sz, sz);
-        } else {
-            const icon =
-                emojiForItemId(itemId) ||
-                factoryLibraryStubForId(itemId).emoji ||
-                String(itemId).slice(0, 1) ||
-                '·';
-            const fsz = Math.max(6, 20 * sc);
-            ctx.font = `${fsz}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#0f172a';
-            ctx.shadowColor = 'rgba(255,255,255,0.75)';
-            ctx.shadowBlur = 2.5 * sc;
-            ctx.fillText(icon, x, y);
-            ctx.shadowBlur = 0;
+        factoryDrawCarryIconWorld(ctx, sc, itemId, x, y);
+    }
+
+    const pls = state.factory.placements || {};
+    const cellItems = state.factory.cellItems || {};
+    for (const [key, itemId] of Object.entries(cellItems)) {
+        if (!itemId || typeof itemId !== 'string') continue;
+        const placement = pls[key];
+        if (
+            placement !== 'transporter' &&
+            placement !== 'bridge' &&
+            placement !== 'splitter' &&
+            placement !== 'sorter'
+        ) {
+            continue;
         }
-        ctx.restore();
+        const s = slides[key];
+        if (s) {
+            const rawP = (now - s.startT) / s.durMs;
+            if (rawP < 1) continue;
+        }
+        factoryKeyToColRow(key, cr);
+        if (!Number.isFinite(cr.col) || !Number.isFinite(cr.row)) continue;
+        const pt = factoryCellCenterCss(cr.col, cr.row, L);
+        factoryDrawCarryIconWorld(ctx, sc, itemId, pt.x, pt.y);
     }
 }
 
@@ -4746,13 +4779,13 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc, drawNow) {
         carryIconRaw ||
         (carryId ? factoryLibraryStubForId(carryId).emoji || String(carryId).slice(0, 1) || '·' : '');
     const slideP = factoryItemSlideProgress(key, now);
-    /** Belt cells: always draw carry in-cell; hiding during slides + overlay desync made items vanish. */
     const beltLikePlacement =
         placement === 'transporter' ||
         placement === 'bridge' ||
         placement === 'splitter' ||
         placement === 'sorter';
-    const hideCarryForSlide = !beltLikePlacement && slideP !== null && slideP < 1;
+    /** Belt/sorter carry is drawn only in {@link factoryDrawItemSlides} (sliding + idle). */
+    const hideCarryForSlide = slideP !== null && slideP < 1;
 
     const midX = w / 2;
     const midY = h / 2;
@@ -5095,7 +5128,7 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc, drawNow) {
         ctx.shadowBlur = 10 * sc;
         ctx.fillText('!', midX, midY);
         ctx.shadowBlur = 0;
-    } else if (carryId && placement !== 'storage' && !hideCarryForSlide) {
+    } else if (carryId && placement !== 'storage' && !beltLikePlacement && !hideCarryForSlide) {
         ctx.shadowColor = 'rgba(0,0,0,0.45)';
         ctx.shadowBlur = 4 * sc;
         ctx.shadowOffsetY = 1;
@@ -5106,8 +5139,7 @@ function factoryDrawCellContent(ctx, col, row, w, h, sc, drawNow) {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.font = fs(20);
-            // Light checkerboard under belts: near-white glyphs disappear; sorter body stays dark.
-            ctx.fillStyle = beltLikePlacement && placement !== 'sorter' ? '#0f172a' : '#fafaf9';
+            ctx.fillStyle = '#fafaf9';
             ctx.fillText(carryIcon, midX, midY);
         }
         ctx.shadowBlur = 0;
