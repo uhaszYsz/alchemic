@@ -38,6 +38,7 @@ import {
     listUserFactories,
     ensureUserHomeFactory,
     claimWorldMapCellForNewFactory,
+    upsertWorldMapFactoryAtCellOnFirstBuild,
     listWorldMapCellsInRect,
     addFactorySnapshoot,
     loadLatestFactorySnapshoot
@@ -380,6 +381,15 @@ function ensureHomeFactoryRow(userId) {
     const uid = Number(userId) | 0;
     if (!uid) return;
     ensureUserHomeFactory(db, uid, JSON.stringify(defaultFactoryState()));
+}
+
+function factoryStateHasBuildingPlacement(st) {
+    const p = st && typeof st === 'object' && st.placements;
+    if (!p || typeof p !== 'object') return false;
+    for (const v of Object.values(p)) {
+        if (v != null && String(v).trim() !== '') return true;
+    }
+    return false;
 }
 
 function sanitizeFactoryState(raw) {
@@ -1543,6 +1553,75 @@ const server = http.createServer((req, res) => {
                 const body = parseBody(raw);
                 if (!body || typeof body.factory !== 'object' || !body.factory) {
                     return send(res, 400, 'factory required', CORS_API);
+                }
+                const wClaim = body.worldClaimOnFirstBuild;
+                if (wClaim && typeof wClaim === 'object') {
+                    const col = Math.trunc(Number(wClaim.col));
+                    const row = Math.trunc(Number(wClaim.row));
+                    if (!Number.isFinite(col) || !Number.isFinite(row)) {
+                        return sendJson(res, 400, { ok: false, error: 'worldClaimOnFirstBuild col and row required' }, CORS_API);
+                    }
+                    const st0 = sanitizeFactoryState(body.factory);
+                    if (!factoryStateHasBuildingPlacement(st0)) {
+                        return sendJson(
+                            res,
+                            400,
+                            { ok: false, error: 'place a building to claim this map cell' },
+                            CORS_API
+                        );
+                    }
+                    const out = upsertWorldMapFactoryAtCellOnFirstBuild(
+                        db,
+                        auth.userId,
+                        col,
+                        row,
+                        JSON.stringify(st0)
+                    );
+                    if (!out.ok) {
+                        return sendJson(res, 409, { ok: false, error: out.error || 'claim failed' }, CORS_API);
+                    }
+                    const factoryId = Math.max(1, Number(out.factoryId) | 0);
+                    const prev = getOrInitFactoryState(auth.userId, factoryId);
+                    if (!prev) {
+                        return sendJson(res, 500, { ok: false, error: 'factory load failed after claim' }, CORS_API);
+                    }
+                    const st = sanitizeFactoryState(body.factory);
+                    st._factoryPendingProduced = sanitizeInventoryMap(prev._factoryPendingProduced);
+                    st._factoryRunStoppedAtIso = prev._factoryRunStoppedAtIso || null;
+                    st._factoryCurrentProducedPerMinute =
+                        prev._factoryCurrentProducedPerMinute && typeof prev._factoryCurrentProducedPerMinute === 'object'
+                            ? { ...prev._factoryCurrentProducedPerMinute }
+                            : {};
+                    st._factoryLastProducedPerMinute =
+                        prev._factoryLastProducedPerMinute && typeof prev._factoryLastProducedPerMinute === 'object'
+                            ? { ...prev._factoryLastProducedPerMinute }
+                            : {};
+                    st._factoryIdleGrantedAtIso =
+                        typeof prev._factoryIdleGrantedAtIso === 'string' && prev._factoryIdleGrantedAtIso.trim()
+                            ? prev._factoryIdleGrantedAtIso.trim()
+                            : null;
+                    st._factoryIdleRemainder =
+                        prev._factoryIdleRemainder && typeof prev._factoryIdleRemainder === 'object'
+                            ? { ...prev._factoryIdleRemainder }
+                            : {};
+                    activateFactoryRunWindow(st, Date.now());
+                    factoryStateByUser.set(factoryMemKey(auth.userId, factoryId), st);
+                    persistFactoryState(auth.userId, factoryId, st);
+                    sendJson(
+                        res,
+                        200,
+                        {
+                            ok: true,
+                            factoryId,
+                            worldCol: col,
+                            worldRow: row,
+                            factories: listUserFactories(db, auth.userId),
+                            inventory: sanitizeInventoryMap(getUserInventoryMap(db, auth.userId)),
+                            runtime: factoryRuntimeStatus(st)
+                        },
+                        CORS_API
+                    );
+                    return;
                 }
                 const factoryId = Math.max(1, Number(body.factoryId != null ? body.factoryId : 1) | 0);
                 const prev = getOrInitFactoryState(auth.userId, factoryId);

@@ -109,7 +109,9 @@ const state = {
         playerPingTimerId: null,
         factoryRuntimeTimerId: null,
         factoryRuntimeUiTimerId: null,
-        enteringFactory: false
+        enteringFactory: false,
+        /** When set, factory tab is editing an empty map cell; claim runs on first building placement. */
+        worldMapUnclaimedEdit: /** @type {null | { col: number, row: number }} */ (null)
     },
     /** comboKey -> true; user cancelled naming earlier */
     deferredDiscoveries: {}
@@ -2570,6 +2572,7 @@ async function pullFactoryRuntimeStatus() {
     // Keep runtime endpoint polling disabled, but fetch fresh runtime on demand
     // from the main factory state endpoint so stats modal shows server-truth.
     if (!state.auth.token) return;
+    if (state.auth.worldMapUnclaimedEdit) return;
     try {
         await pullFactoryStateFromServer();
     } catch {
@@ -2670,6 +2673,40 @@ function normalizeFactoryFromServer(factory) {
         : state.factory.cameraZoom;
 }
 
+function factoryLocalHasPlacements() {
+    const p = state.factory.placements;
+    if (!p || typeof p !== 'object') return false;
+    for (const v of Object.values(p)) {
+        if (v != null && String(v).trim() !== '') return true;
+    }
+    return false;
+}
+
+function resetLocalFactoryForMapPreview() {
+    state.factory.placements = {};
+    state.factory.selectedBuilding = null;
+    state.factory.cellResources = {};
+    state.factory.transporterDirs = {};
+    state.factory.sorterDirs = {};
+    state.factory.sorterItemFilters = {};
+    state.factory.bridgeDirs = {};
+    state.factory.cellItems = {};
+    state.factory.combinerDirs = {};
+    state.factory.combinerDiscovery = {};
+    state.factory.factoryDiscoveryCombinerKey = null;
+    state.factory.itemSlides = {};
+    state.factory.beltDragPreview = null;
+    state.factory.cellRejectFlashUntil = {};
+    state.factory.sizeUpgradeLevel = 0;
+    state.factory.loopMs = FACTORY_LOOP_MS_DEFAULT;
+    state.factory.loopTick = 0;
+    state.factory.cameraX = (FACTORY_GRID_BASE - 1) / 2;
+    state.factory.cameraY = (FACTORY_GRID_BASE - 1) / 2;
+    state.factory.cameraZoom = 1;
+    factoryClearBeltLineState();
+    updateFactoryBuildButtons();
+}
+
 function buildFactoryPayload() {
     return {
         placements: state.factory.placements,
@@ -2697,8 +2734,6 @@ let factoryStateSyncQueued = false;
 
 async function flushFactoryStateToServer() {
     if (!state.auth.token) return;
-    const fid = state.auth.activeFactoryId;
-    if (fid == null || fid < 1) return;
     if (factoryStateSyncInFlight) {
         factoryStateSyncQueued = true;
         return;
@@ -2707,6 +2742,55 @@ async function flushFactoryStateToServer() {
     try {
         do {
             factoryStateSyncQueued = false;
+            const pendingWorld = state.auth.worldMapUnclaimedEdit;
+            if (pendingWorld) {
+                if (!factoryLocalHasPlacements()) continue;
+                const r = await apiFetch('/api/factory/state', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        worldClaimOnFirstBuild: { col: pendingWorld.col, row: pendingWorld.row },
+                        factory: buildFactoryPayload()
+                    })
+                });
+                let payload = {};
+                try {
+                    payload = await r.json();
+                } catch {
+                    payload = {};
+                }
+                if (r.ok && payload && typeof payload === 'object' && payload.factoryId != null) {
+                    const col = pendingWorld.col;
+                    const row = pendingWorld.row;
+                    state.auth.worldMapUnclaimedEdit = null;
+                    state.auth.activeFactoryId = Math.max(1, Number(payload.factoryId) | 0);
+                    const k = worldMapKey(col, row);
+                    state.worldMap.cells[k] = {
+                        userId: state.auth.userId | 0,
+                        factoryId: state.auth.activeFactoryId,
+                        username: state.auth.username || ''
+                    };
+                    if (Array.isArray(payload.factories)) {
+                        state.auth.myFactories = payload.factories.map((x) => ({
+                            factoryId: Math.max(1, Number(x.factoryId) | 0),
+                            worldCol: x.worldCol != null && x.worldCol !== '' ? Number(x.worldCol) | 0 : null,
+                            worldRow: x.worldRow != null && x.worldRow !== '' ? Number(x.worldRow) | 0 : null
+                        }));
+                    } else {
+                        await refreshFactoryListFromServer();
+                    }
+                    renderActiveFactoryList();
+                    if (payload.inventory) applyServerInventorySnapshot(payload.inventory);
+                    if (payload.runtime) applyFactoryRuntime(payload.runtime);
+                    void startFactoryRunOnServer();
+                } else if (!r.ok) {
+                    const err = (payload && payload.error) || 'claim failed';
+                    setAuthStatus(String(err).slice(0, 120));
+                }
+                continue;
+            }
+            const fid = state.auth.activeFactoryId;
+            if (fid == null || fid < 1) continue;
             const r = await apiFetch('/api/factory/state', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2767,7 +2851,8 @@ async function refreshFactoryListFromServer() {
         }));
         if (
             (state.auth.activeFactoryId == null || state.auth.activeFactoryId < 1) &&
-            state.auth.myFactories.length > 0
+            state.auth.myFactories.length > 0 &&
+            !state.auth.worldMapUnclaimedEdit
         ) {
             state.auth.activeFactoryId = state.auth.myFactories[0].factoryId;
         }
@@ -2804,6 +2889,7 @@ function renderActiveFactoryList() {
             ? `Factory #${f.factoryId} — map (${f.worldCol}, ${f.worldRow})`
             : `Factory #${f.factoryId} — home (not on map)`;
         row.addEventListener('click', () => {
+            state.auth.worldMapUnclaimedEdit = null;
             state.auth.activeFactoryId = f.factoryId;
             renderActiveFactoryList();
             setWorkspace('factory');
@@ -5144,46 +5230,18 @@ async function worldTryClaimOrOpen(col, row) {
     const occ = state.worldMap.cells[k];
     if (occ) {
         if (occ.userId === (state.auth.userId | 0)) {
+            state.auth.worldMapUnclaimedEdit = null;
             state.auth.activeFactoryId = occ.factoryId;
             renderActiveFactoryList();
             setWorkspace('factory');
         }
         return;
     }
-    try {
-        const r = await apiFetch('/api/world/claim', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ col, row })
-        });
-        const payload = await r.json().catch(() => ({}));
-        if (!r.ok) {
-            const err = (payload && payload.error) || (await r.text()) || 'claim failed';
-            setAuthStatus(String(err).slice(0, 120));
-            return;
-        }
-        if (payload && payload.factoryId != null) {
-            state.auth.activeFactoryId = Number(payload.factoryId) | 0;
-        }
-        state.worldMap.cells[k] = {
-            userId: state.auth.userId | 0,
-            factoryId: state.auth.activeFactoryId || 1,
-            username: state.auth.username || ''
-        };
-        if (Array.isArray(payload.factories)) {
-            state.auth.myFactories = payload.factories.map((x) => ({
-                factoryId: Math.max(1, Number(x.factoryId) | 0),
-                worldCol: x.worldCol != null && x.worldCol !== '' ? Number(x.worldCol) | 0 : null,
-                worldRow: x.worldRow != null && x.worldRow !== '' ? Number(x.worldRow) | 0 : null
-            }));
-        } else {
-            await refreshFactoryListFromServer();
-        }
-        renderActiveFactoryList();
-        setWorkspace('factory');
-    } catch (e) {
-        setAuthStatus(e && e.message ? String(e.message).slice(0, 120) : 'claim failed');
-    }
+    state.auth.worldMapUnclaimedEdit = { col, row: row };
+    state.auth.activeFactoryId = null;
+    resetLocalFactoryForMapPreview();
+    renderActiveFactoryList();
+    setWorkspace('factory');
 }
 
 if (worldCanvasEl) {
@@ -5455,6 +5513,14 @@ function setWorkspace(which) {
         void refreshFactoryListFromServer().then(() => {
             if (!state.auth.myFactories.length) {
                 setAuthStatus('No factories loaded. Open Map tab or re-login.');
+                return;
+            }
+            if (state.auth.worldMapUnclaimedEdit) {
+                state.auth.activeFactoryId = null;
+                renderActiveFactoryList();
+                renderFactoryGrid();
+                startFactoryLoop();
+                void startFactoryRunOnServer();
                 return;
             }
             if (state.auth.activeFactoryId == null) {
@@ -6943,6 +7009,7 @@ if (authLogoutBtn) {
         state.auth.username = '';
         state.auth.userId = 0;
         state.auth.activeFactoryId = null;
+        state.auth.worldMapUnclaimedEdit = null;
         state.auth.myFactories = [];
         state.worldMap.cells = {};
         state.worldMap.lastQueryKey = '';

@@ -1185,6 +1185,71 @@ export function claimWorldMapCellForNewFactory(db, userId, col, row, stateJson) 
 }
 
 /**
+ * Create a map factory at (col,row) or update state if this user already owns that cell.
+ * Used when claiming on first building placement (not on map click).
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} userId
+ * @param {number} col
+ * @param {number} row
+ * @param {string} stateJson
+ * @returns {{ ok: boolean, factoryId?: number, existing?: boolean, error?: string }}
+ */
+export function upsertWorldMapFactoryAtCellOnFirstBuild(db, userId, col, row, stateJson) {
+    const uid = Number(userId) | 0;
+    const c = Math.trunc(Number(col));
+    const r = Math.trunc(Number(row));
+    if (!uid) return { ok: false, error: 'bad user' };
+    if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false, error: 'bad coordinates' };
+    const home = db.prepare('SELECT 1 FROM user_factories WHERE user_id = ? AND factory_id = 1').get(uid);
+    if (!home) return { ok: false, error: 'home factory missing' };
+    if (!userHasAnyFactoryConstruction(db, uid)) {
+        return { ok: false, error: 'place at least one building in a factory first' };
+    }
+    const mine = db
+        .prepare(
+            `SELECT factory_id FROM user_factories WHERE user_id = ? AND world_col IS NOT NULL AND world_row IS NOT NULL
+             AND world_col = ? AND world_row = ?`
+        )
+        .get(uid, c, r);
+    if (mine) {
+        const fid = Number(mine.factory_id) | 0;
+        db.prepare(
+            `UPDATE user_factories SET state_json = ?, updated_at = datetime('now') WHERE user_id = ? AND factory_id = ?`
+        ).run(String(stateJson), uid, fid);
+        return { ok: true, factoryId: fid, existing: true };
+    }
+    const other = db
+        .prepare(
+            `SELECT user_id FROM user_factories WHERE world_col IS NOT NULL AND world_row IS NOT NULL
+             AND world_col = ? AND world_row = ?`
+        )
+        .get(c, r);
+    if (other && (Number(other.user_id) | 0) !== uid) {
+        return { ok: false, error: 'cell occupied' };
+    }
+    const maxRow = db.prepare('SELECT MAX(factory_id) AS m FROM user_factories WHERE user_id = ?').get(uid);
+    const next = (Number(maxRow && maxRow.m) || 0) + 1;
+    if (next < 2) return { ok: false, error: 'map is only for extra factories' };
+    try {
+        db.prepare(
+            `INSERT INTO user_factories (user_id, factory_id, world_col, world_row, state_json, updated_at)
+             VALUES (@user_id, @factory_id, @world_col, @world_row, @state_json, datetime('now'))`
+        ).run({
+            user_id: uid,
+            factory_id: next,
+            world_col: c,
+            world_row: r,
+            state_json: String(stateJson)
+        });
+    } catch (e) {
+        const msg = e && typeof e.message === 'string' ? e.message : String(e);
+        if (/unique/i.test(msg)) return { ok: false, error: 'cell occupied' };
+        return { ok: false, error: msg || 'insert failed' };
+    }
+    return { ok: true, factoryId: next };
+}
+
+/**
  * @param {import('better-sqlite3').Database} db
  * @param {number} minCol
  * @param {number} minRow
