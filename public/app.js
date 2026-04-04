@@ -82,7 +82,7 @@ const state = {
         combinerDiscovery: {},
         /** When discovery modal opened from factory combiner, cell key to resolve on save */
         factoryDiscoveryCombinerKey: null,
-        /** Smooth belt moves: dest key → { fromKey, startT, durMs } (durMs = factory loop interval) */
+        /** Smooth belt moves: dest key → flat { fromKey, startT, durMs } or chained { legs, slideItemId? } */
         itemSlides: {},
         /** While dragging to place transporters: cells (filtered) for preview overlay */
         beltDragPreview: /** @type {null | { col: number, row: number }[]} */ (null),
@@ -3172,12 +3172,12 @@ function factoryRunSimTick(nowTick) {
     for (const k of Object.keys(state.factory.itemSlides)) {
         const s = state.factory.itemSlides[k];
         if (!s) continue;
-        const rawP = (slideT - s.startT) / s.durMs;
-        if (!Number.isFinite(rawP)) {
+        const endT = factorySlideEndTimeMs(s);
+        if (!Number.isFinite(endT)) {
             delete state.factory.itemSlides[k];
             continue;
         }
-        if (rawP < 1) continue;
+        if (slideT < endT) continue;
         delete state.factory.itemSlides[k];
     }
     const out = simulateFactoryStep(state.factory, {
@@ -4106,20 +4106,43 @@ function factoryShiftKeyedMaps(dc, dr) {
     {
         const slides = state.factory.itemSlides;
         const out = /** @type {typeof state.factory.itemSlides} */ ({});
+        const shiftCellKey = (k) => {
+            const p = k.split(',');
+            const c = Number(p[0]);
+            const r = Number(p[1]);
+            if (!Number.isFinite(c) || !Number.isFinite(r)) return null;
+            return `${c + dc},${r + dr}`;
+        };
         for (const [toKey, s] of Object.entries(slides)) {
-            if (!s || typeof s.fromKey !== 'string') continue;
-            const tp = toKey.split(',');
-            const tc = Number(tp[0]);
-            const tr = Number(tp[1]);
+            if (!s) continue;
+            const newTo = shiftCellKey(toKey);
+            if (!newTo) continue;
+            if (s.legs && Array.isArray(s.legs) && s.legs.length) {
+                const newLegs = [];
+                for (const leg of s.legs) {
+                    const nf = shiftCellKey(leg.fromKey);
+                    const nt = shiftCellKey(leg.toKey);
+                    if (!nf || !nt) continue;
+                    newLegs.push({ fromKey: nf, toKey: nt, startT: leg.startT, durMs: leg.durMs });
+                }
+                if (!newLegs.length) continue;
+                /** @type {typeof s} */
+                const rec = { legs: newLegs };
+                if (typeof s.slideItemId === 'string' && s.slideItemId) rec.slideItemId = s.slideItemId;
+                out[newTo] = rec;
+                continue;
+            }
+            if (typeof s.fromKey !== 'string') continue;
             const fp = s.fromKey.split(',');
             const fc = Number(fp[0]);
             const fr = Number(fp[1]);
-            if (!Number.isFinite(tc) || !Number.isFinite(tr) || !Number.isFinite(fc) || !Number.isFinite(fr)) continue;
-            out[`${tc + dc},${tr + dr}`] = {
+            if (!Number.isFinite(fc) || !Number.isFinite(fr)) continue;
+            out[newTo] = {
                 fromKey: `${fc + dc},${fr + dr}`,
                 startT: s.startT,
                 durMs: s.durMs
             };
+            if (typeof s.slideItemId === 'string' && s.slideItemId) out[newTo].slideItemId = s.slideItemId;
         }
         state.factory.itemSlides = out;
     }
@@ -4265,6 +4288,36 @@ function factoryCombinerDir(key) {
     return typeof d === 'number' && d >= 0 && d <= 3 ? d : 0;
 }
 
+/** @param {{ fromKey?: string, startT?: number, durMs?: number, legs?: { fromKey: string, toKey: string, startT: number, durMs: number }[] }} s */
+function factorySlideEndTimeMs(s) {
+    if (s.legs && Array.isArray(s.legs) && s.legs.length) {
+        const last = s.legs[s.legs.length - 1];
+        return last.startT + last.durMs;
+    }
+    const st = s.startT;
+    const d = s.durMs;
+    if (!Number.isFinite(st) || !Number.isFinite(d)) return NaN;
+    return st + d;
+}
+
+/** @param {{ fromKey?: string, startT?: number, durMs?: number, legs?: { fromKey: string, toKey: string, startT: number, durMs: number }[] }} s @param {number} t */
+function factorySlideAnimActive(s, t) {
+    const end = factorySlideEndTimeMs(s);
+    return Number.isFinite(end) && t < end;
+}
+
+/**
+ * If an incoming slide into `fromKey` is still animating, remove it and return it so we can chain to `toKey`.
+ * @param {string} fromKey
+ * @param {number} t
+ */
+function factoryTakeIncomingSlideForChain(fromKey, t) {
+    const s = state.factory.itemSlides[fromKey];
+    if (!s || !factorySlideAnimActive(s, t)) return null;
+    delete state.factory.itemSlides[fromKey];
+    return s;
+}
+
 /**
  * @param {string} toKey
  * @param {string} fromKey
@@ -4273,8 +4326,29 @@ function factoryCombinerDir(key) {
  * @param {string} [slideItemId] sprite when `cellItems[toKey]` is empty (e.g. second item into combiner same tick as merge)
  */
 function factoryRecordItemSlide(toKey, fromKey, durMs, startT, slideItemId) {
-    const rec = { fromKey, startT, durMs };
+    const incoming = factoryTakeIncomingSlideForChain(fromKey, startT);
+    /** @type {{ fromKey?: string, startT?: number, durMs?: number, legs?: { fromKey: string, toKey: string, startT: number, durMs: number }[], slideItemId?: string }} */
+    let rec;
+    if (incoming) {
+        const legs =
+            incoming.legs && Array.isArray(incoming.legs) && incoming.legs.length
+                ? incoming.legs.map((leg) => ({ ...leg }))
+                : [
+                      {
+                          fromKey: incoming.fromKey,
+                          toKey: fromKey,
+                          startT: incoming.startT,
+                          durMs: incoming.durMs
+                      }
+                  ];
+        const tNext = factorySlideEndTimeMs(incoming);
+        legs.push({ fromKey, toKey: toKey, startT: tNext, durMs });
+        rec = { legs };
+    } else {
+        rec = { fromKey, startT, durMs };
+    }
     if (typeof slideItemId === 'string' && slideItemId) rec.slideItemId = slideItemId;
+    else if (incoming && typeof incoming.slideItemId === 'string' && incoming.slideItemId) rec.slideItemId = incoming.slideItemId;
     state.factory.itemSlides[toKey] = rec;
 }
 
@@ -4282,7 +4356,18 @@ function factoryRecordItemSlide(toKey, fromKey, durMs, startT, slideItemId) {
 function factoryClearSlidesTouchingKey(key) {
     delete state.factory.itemSlides[key];
     for (const tk of Object.keys(state.factory.itemSlides)) {
-        if (state.factory.itemSlides[tk].fromKey === key) delete state.factory.itemSlides[tk];
+        const s = state.factory.itemSlides[tk];
+        if (!s) continue;
+        if (s.legs && Array.isArray(s.legs)) {
+            for (const leg of s.legs) {
+                if (leg.fromKey === key || leg.toKey === key) {
+                    delete state.factory.itemSlides[tk];
+                    break;
+                }
+            }
+        } else if (s.fromKey === key) {
+            delete state.factory.itemSlides[tk];
+        }
     }
 }
 
@@ -4294,7 +4379,16 @@ function factoryClearSlidesTouchingKey(key) {
 function factoryItemSlideProgress(key, now) {
     const s = state.factory.itemSlides[key];
     if (!s) return null;
-    return Math.min(1, Math.max(0, (now - s.startT) / s.durMs));
+    if (s.legs && Array.isArray(s.legs) && s.legs.length) {
+        if (!factorySlideAnimActive(s, now)) return null;
+        const span = factorySlideEndTimeMs(s) - s.legs[0].startT;
+        if (!Number.isFinite(span) || span <= 0) return 0.5;
+        return Math.min(1, Math.max(0, (now - s.legs[0].startT) / span));
+    }
+    const p = (now - s.startT) / s.durMs;
+    if (!Number.isFinite(p)) return null;
+    if (p >= 1) return null;
+    return Math.min(1, Math.max(0, p));
 }
 
 /** @param {string} key @param {{ col: number, row: number }} out */
@@ -4376,22 +4470,56 @@ function factoryDrawItemSlides(ctx, L, sc, now) {
             delete slides[toKey];
             continue;
         }
-        const rawP = (now - s.startT) / s.durMs;
-        if (rawP >= 1) {
+        if (!factorySlideAnimActive(s, now)) {
             delete slides[toKey];
             continue;
         }
-        const p = factoryEaseInOutQuad(Math.min(1, Math.max(0, rawP)));
-        factoryKeyToColRow(toKey, cr);
-        factoryKeyToColRow(s.fromKey, fr);
-        if (!Number.isFinite(cr.col) || !Number.isFinite(fr.col)) {
+        let x = 0;
+        let y = 0;
+        let ok = false;
+        if (s.legs && Array.isArray(s.legs) && s.legs.length) {
+            for (const leg of s.legs) {
+                if (now < leg.startT) {
+                    factoryKeyToColRow(leg.fromKey, fr);
+                    if (!Number.isFinite(fr.col) || !Number.isFinite(fr.row)) break;
+                    const pt = factoryCellCenterCss(fr.col, fr.row, L);
+                    x = pt.x;
+                    y = pt.y;
+                    ok = true;
+                    break;
+                }
+                const legEnd = leg.startT + leg.durMs;
+                if (now < legEnd) {
+                    const rawP = (now - leg.startT) / leg.durMs;
+                    const p = factoryEaseInOutQuad(Math.min(1, Math.max(0, rawP)));
+                    factoryKeyToColRow(leg.fromKey, fr);
+                    factoryKeyToColRow(leg.toKey, cr);
+                    if (!Number.isFinite(cr.col) || !Number.isFinite(fr.col)) break;
+                    const fromPt = factoryCellCenterCss(fr.col, fr.row, L);
+                    const toPt = factoryCellCenterCss(cr.col, cr.row, L);
+                    x = fromPt.x + (toPt.x - fromPt.x) * p;
+                    y = fromPt.y + (toPt.y - fromPt.y) * p;
+                    ok = true;
+                    break;
+                }
+            }
+        } else if (typeof s.fromKey === 'string') {
+            const rawP = (now - s.startT) / s.durMs;
+            const p = factoryEaseInOutQuad(Math.min(1, Math.max(0, rawP)));
+            factoryKeyToColRow(toKey, cr);
+            factoryKeyToColRow(s.fromKey, fr);
+            if (Number.isFinite(cr.col) && Number.isFinite(fr.col)) {
+                const fromPt = factoryCellCenterCss(fr.col, fr.row, L);
+                const toPt = factoryCellCenterCss(cr.col, cr.row, L);
+                x = fromPt.x + (toPt.x - fromPt.x) * p;
+                y = fromPt.y + (toPt.y - fromPt.y) * p;
+                ok = true;
+            }
+        }
+        if (!ok) {
             delete slides[toKey];
             continue;
         }
-        const fromPt = factoryCellCenterCss(fr.col, fr.row, L);
-        const toPt = factoryCellCenterCss(cr.col, cr.row, L);
-        const x = fromPt.x + (toPt.x - fromPt.x) * p;
-        const y = fromPt.y + (toPt.y - fromPt.y) * p;
         factoryDrawCarryIconWorld(ctx, sc, itemId, x, y);
     }
 
@@ -4409,10 +4537,7 @@ function factoryDrawItemSlides(ctx, L, sc, now) {
             continue;
         }
         const s = slides[key];
-        if (s) {
-            const rawP = (now - s.startT) / s.durMs;
-            if (rawP < 1) continue;
-        }
+        if (s && factorySlideAnimActive(s, now)) continue;
         factoryKeyToColRow(key, cr);
         if (!Number.isFinite(cr.col) || !Number.isFinite(cr.row)) continue;
         const pt = factoryCellCenterCss(cr.col, cr.row, L);
