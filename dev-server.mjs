@@ -347,6 +347,7 @@ function defaultFactoryState() {
         selectedBuilding: null,
         cellResources: {},
         transporterDirs: {},
+        splitterDirs: {},
         sorterDirs: {},
         sorterItemFilters: {},
         bridgeDirs: {},
@@ -399,6 +400,7 @@ function sanitizeFactoryState(raw) {
     st.placements = typeof raw.placements === 'object' && raw.placements ? raw.placements : {};
     st.cellResources = typeof raw.cellResources === 'object' && raw.cellResources ? raw.cellResources : {};
     st.transporterDirs = typeof raw.transporterDirs === 'object' && raw.transporterDirs ? raw.transporterDirs : {};
+    st.splitterDirs = typeof raw.splitterDirs === 'object' && raw.splitterDirs ? raw.splitterDirs : {};
     st.sorterDirs = typeof raw.sorterDirs === 'object' && raw.sorterDirs ? raw.sorterDirs : {};
     st.sorterItemFilters = typeof raw.sorterItemFilters === 'object' && raw.sorterItemFilters ? raw.sorterItemFilters : {};
     st.bridgeDirs = typeof raw.bridgeDirs === 'object' && raw.bridgeDirs ? raw.bridgeDirs : {};
@@ -690,6 +692,7 @@ function factoryClientSnapshot(state) {
         selectedBuilding: state.selectedBuilding || null,
         cellResources: state.cellResources || {},
         transporterDirs: state.transporterDirs || {},
+        splitterDirs: state.splitterDirs || {},
         sorterDirs: state.sorterDirs || {},
         sorterItemFilters: state.sorterItemFilters || {},
         bridgeDirs: state.bridgeDirs || {},

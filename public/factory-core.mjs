@@ -61,42 +61,72 @@ function inputDirFromTransporterOutputDir(outDir) {
     return 2; // left
 }
 
-function ensureTransporterConflictState(state, getTransporterDir) {
-    const signatureParts = [];
+function isBeltMergeDest(placement) {
+    return placement === 'transporter' || placement === 'splitter';
+}
+
+function skipDirForBeltMergeDest(state, destKey, getTransporterDir, getSplitterDir) {
+    const pl = state.placements[destKey];
+    const d =
+        pl === 'splitter'
+            ? getSplitterDir(destKey)
+            : pl === 'transporter'
+              ? getTransporterDir(destKey)
+              : 0;
+    return inputDirFromTransporterOutputDir(d);
+}
+
+/**
+ * Rebuild merge-arbitration metadata for transporter/splitter cells that receive from multiple sides.
+ * @param {Record<string, string>} splitterTTPlanned splitterKey -> destKey for this wave's TT pushes
+ */
+function refreshBeltMergeConflicts(state, getTransporterDir, getSplitterDir, splitterTTPlanned) {
     const transporterKeys = Object.entries(state.placements || {})
         .filter(([, p]) => p === 'transporter')
         .map(([k]) => k)
         .sort();
-    for (const key of transporterKeys) {
-        signatureParts.push(`${key}:${getTransporterDir(key)}`);
-    }
-    const sig = signatureParts.join('|');
-    if (state._ttConflictSig === sig && state._ttConflictInputs && state._ttInputCursor) return;
-
     const incomingByDest = {};
     for (const srcKey of transporterKeys) {
         const s = factoryKeyToColRow(srcKey);
         if (!Number.isFinite(s.col) || !Number.isFinite(s.row)) continue;
         const nb = factoryNeighborColRow(s.col, s.row, getTransporterDir(srcKey));
         const destKey = factoryPlacementKey(nb.col, nb.row);
-        if (state.placements[destKey] !== 'transporter') continue;
+        if (!isBeltMergeDest(state.placements[destKey])) continue;
         const d = factoryKeyToColRow(destKey);
         const inDir = inputDirFromSourceToDest(s.col, s.row, d.col, d.row);
         if (inDir < 0) continue;
         if (!incomingByDest[destKey]) incomingByDest[destKey] = [];
         incomingByDest[destKey].push(inDir);
     }
+    const planned = splitterTTPlanned && typeof splitterTTPlanned === 'object' ? splitterTTPlanned : {};
+    for (const [sk, dk] of Object.entries(planned)) {
+        if (!dk || state.placements[sk] !== 'splitter') continue;
+        if (!isBeltMergeDest(state.placements[dk])) continue;
+        const s = factoryKeyToColRow(sk);
+        const d = factoryKeyToColRow(dk);
+        if (
+            !Number.isFinite(s.col) ||
+            !Number.isFinite(s.row) ||
+            !Number.isFinite(d.col) ||
+            !Number.isFinite(d.row)
+        ) {
+            continue;
+        }
+        const inDir = inputDirFromSourceToDest(s.col, s.row, d.col, d.row);
+        if (inDir < 0) continue;
+        if (!incomingByDest[dk]) incomingByDest[dk] = [];
+        incomingByDest[dk].push(inDir);
+    }
     const conflictInputs = {};
     for (const [destKey, dirs] of Object.entries(incomingByDest)) {
         const uniq = [...new Set(dirs)].sort((a, b) => a - b);
         if (uniq.length > 1) conflictInputs[destKey] = uniq;
     }
-
     const nextCursor = {};
     const prevCursor = state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : {};
     for (const destKey of Object.keys(conflictInputs)) {
         const prev = ((Number(prevCursor[destKey] || 0) | 0) + 4) % 4;
-        const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(destKey));
+        const skipDir = skipDirForBeltMergeDest(state, destKey, getTransporterDir, getSplitterDir);
         let cur = prev;
         for (let i = 0; i < 4; i++) {
             if (cur !== skipDir) break;
@@ -104,9 +134,107 @@ function ensureTransporterConflictState(state, getTransporterDir) {
         }
         nextCursor[destKey] = cur;
     }
-    state._ttConflictSig = sig;
     state._ttConflictInputs = conflictInputs;
     state._ttInputCursor = nextCursor;
+}
+
+/**
+ * @param {Record<string, string>} outPlanned
+ * @returns {number} number of TT moves added
+ */
+function emitSplitterOutbound(
+    state,
+    work,
+    spawnedThisTick,
+    inBounds,
+    getSplitterDir,
+    movesTTCandidates,
+    deposits,
+    outPlanned
+) {
+    let ttAdded = 0;
+    if (!state._splitterOutputCursor || typeof state._splitterOutputCursor !== 'object') {
+        state._splitterOutputCursor = {};
+    }
+    if (!state._splitterChosenIdx || typeof state._splitterChosenIdx !== 'object') {
+        state._splitterChosenIdx = {};
+    }
+    if (!state._splitterOptLen || typeof state._splitterOptLen !== 'object') {
+        state._splitterOptLen = {};
+    }
+    if (!state._splitterHudDir || typeof state._splitterHudDir !== 'object') {
+        state._splitterHudDir = {};
+    }
+    const curMap = state._splitterOutputCursor;
+    for (const [key, p] of Object.entries(state.placements || {})) {
+        if (p !== 'splitter') continue;
+        delete state._splitterChosenIdx[key];
+        delete state._splitterOptLen[key];
+        delete state._splitterHudDir[key];
+    }
+    for (const [key, p] of Object.entries(state.placements || {})) {
+        if (p !== 'splitter') continue;
+        if (spawnedThisTick.has(key)) continue;
+        const itemId = work[key];
+        if (!itemId) continue;
+        const cell = factoryKeyToColRow(key);
+        if (!Number.isFinite(cell.col) || !Number.isFinite(cell.row)) continue;
+        /** @type {{ kind: string, dir: number, destKey: string }[]} */
+        const options = [];
+        for (let d = 0; d < 4; d++) {
+            const nb = factoryNeighborColRow(cell.col, cell.row, d);
+            if (!inBounds(nb.col, nb.row)) continue;
+            const destKey = factoryPlacementKey(nb.col, nb.row);
+            const destPl = state.placements[destKey];
+            if (destPl === 'storage') {
+                options.push({ kind: 'dep', dir: d, destKey });
+            } else if (
+                destPl === 'transporter' ||
+                destPl === 'sorter' ||
+                destPl === 'bridge' ||
+                destPl === 'splitter'
+            ) {
+                if (!work[destKey]) options.push({ kind: 'tt', dir: d, destKey });
+            }
+        }
+        if (!options.length) continue;
+        options.sort((a, b) => a.destKey.localeCompare(b.destKey) || a.dir - b.dir);
+        const optLen = options.length;
+        const start = ((Number(curMap[key] || 0) | 0) + optLen * 256) % optLen;
+        let chosen = null;
+        let chosenIdx = 0;
+        for (let i = 0; i < options.length; i++) {
+            const idx = (start + i) % optLen;
+            const o = options[idx];
+            if (o.kind === 'tt' && !work[o.destKey]) {
+                chosen = o;
+                chosenIdx = idx;
+                break;
+            }
+            if (o.kind === 'dep') {
+                chosen = o;
+                chosenIdx = idx;
+                break;
+            }
+        }
+        if (!chosen) continue;
+        state._splitterHudDir[key] = chosen.dir;
+        if (chosen.kind === 'dep') {
+            deposits.push({ from: key, to: chosen.destKey, itemId });
+            if (optLen >= 2) {
+                curMap[key] = (chosenIdx + 1) % optLen;
+            }
+        } else {
+            outPlanned[key] = chosen.destKey;
+            movesTTCandidates.push({ from: key, to: chosen.destKey, itemId });
+            ttAdded += 1;
+            if (optLen >= 2) {
+                state._splitterChosenIdx[key] = chosenIdx;
+                state._splitterOptLen[key] = optLen;
+            }
+        }
+    }
+    return ttAdded;
 }
 
 /**
@@ -131,7 +259,7 @@ export function simulateFactoryStep(state, deps) {
         for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
         return ((h + loopTick + pass) >>> 0) % Math.max(1, count);
     };
-    ensureTransporterConflictState(state, getTransporterDir);
+    const getSplitterDir = typeof deps.getSplitterDir === 'function' ? deps.getSplitterDir : () => 0;
 
     const work = {};
     for (const [k, v] of Object.entries(state.cellItems || {})) {
@@ -152,7 +280,13 @@ export function simulateFactoryStep(state, deps) {
                 const nb = factoryNeighborColRow(cell.col, cell.row, dir);
                 if (!inBounds(nb.col, nb.row)) continue;
                 const tk = factoryPlacementKey(nb.col, nb.row);
-                if (state.placements[tk] !== 'transporter' && state.placements[tk] !== 'bridge') continue;
+                if (
+                    state.placements[tk] !== 'transporter' &&
+                    state.placements[tk] !== 'bridge' &&
+                    state.placements[tk] !== 'splitter'
+                ) {
+                    continue;
+                }
                 if (work[tk]) continue;
                 work[tk] = resId;
                 spawnedThisTick.add(tk);
@@ -161,14 +295,9 @@ export function simulateFactoryStep(state, deps) {
         }
     }
 
-    const deposits = [];
     const sorterPulls = [];
     const bridgeMoves = [];
-    const movesTTCandidates = [];
-    const movesToEmptyCombinerCandidates = [];
-    const movesTT = [];
     const movesToEmptyCombiner = [];
-    const combinerFeeds = [];
 
     for (const [sorterKey, p] of Object.entries(state.placements || {})) {
         if (p !== 'sorter') continue;
@@ -184,7 +313,8 @@ export function simulateFactoryStep(state, deps) {
             const nb = factoryNeighborColRow(sc.col, sc.row, dir);
             if (!inBounds(nb.col, nb.row)) continue;
             const fromKey = factoryPlacementKey(nb.col, nb.row);
-            if (state.placements[fromKey] !== 'transporter') continue;
+            const fromPl = state.placements[fromKey];
+            if (fromPl !== 'transporter' && fromPl !== 'splitter') continue;
             const itemId = work[fromKey];
             if (!itemId) continue;
             if (filterId && itemId !== filterId) continue;
@@ -207,9 +337,146 @@ export function simulateFactoryStep(state, deps) {
         sorterPulls.push({ from: chosen.from, to: sorterKey, itemId: chosen.itemId });
     }
 
+    const invDelta = {};
+    const deposits = [];
+    const claimedDest = new Set();
+    const claimedFrom = new Set();
+    const movesTT = [];
+
+    const MAX_BELT_WAVES = 20;
+    let cursorMap = state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : {};
+
+    for (let beltWave = 0; beltWave < MAX_BELT_WAVES; beltWave++) {
+        const movesTTCandidates = [];
+        const depositsWave = [];
+
+        for (const [key, p] of Object.entries(state.placements || {})) {
+            if (p !== 'transporter' && p !== 'sorter') continue;
+            if (spawnedThisTick.has(key)) continue;
+            const itemId = work[key];
+            if (!itemId) continue;
+            const cell = factoryKeyToColRow(key);
+            const outDir = p === 'sorter' ? getSorterDir(key) : getTransporterDir(key);
+            const nb = factoryNeighborColRow(cell.col, cell.row, outDir);
+            if (!inBounds(nb.col, nb.row)) continue;
+            const destKey = factoryPlacementKey(nb.col, nb.row);
+            const destPl = state.placements[destKey];
+            if (destPl === 'storage') {
+                depositsWave.push({ from: key, to: destKey, itemId });
+            } else if (
+                destPl === 'transporter' ||
+                destPl === 'sorter' ||
+                destPl === 'bridge' ||
+                destPl === 'splitter'
+            ) {
+                movesTTCandidates.push({ from: key, to: destKey, itemId });
+            }
+        }
+
+        const splitterTTPlanned = {};
+        emitSplitterOutbound(
+            state,
+            work,
+            spawnedThisTick,
+            inBounds,
+            getSplitterDir,
+            movesTTCandidates,
+            depositsWave,
+            splitterTTPlanned
+        );
+
+        if (movesTTCandidates.length === 0 && depositsWave.length === 0) break;
+
+        refreshBeltMergeConflicts(state, getTransporterDir, getSplitterDir, splitterTTPlanned);
+
+        const conflictInputs =
+            state._ttConflictInputs && typeof state._ttConflictInputs === 'object' ? state._ttConflictInputs : {};
+        cursorMap =
+            state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : cursorMap;
+
+        const acceptedFromByDest = {};
+        for (const destKey of Object.keys(conflictInputs)) {
+            const dirs = Array.isArray(conflictInputs[destKey]) ? conflictInputs[destKey] : [];
+            if (!dirs.length) continue;
+            const d = factoryKeyToColRow(destKey);
+            if (!Number.isFinite(d.col) || !Number.isFinite(d.row)) continue;
+            const startDir = ((Number(cursorMap[destKey] || 0) | 0) + 4) % 4;
+            const skipDir = skipDirForBeltMergeDest(state, destKey, getTransporterDir, getSplitterDir);
+            for (let i = 0; i < 4; i++) {
+                const dir = (startDir + i) % 4;
+                if (dir === skipDir) continue;
+                if (!dirs.includes(dir)) continue;
+                const src = sourceColRowFromInputDir(d.col, d.row, dir);
+                const srcKey = factoryPlacementKey(src.col, src.row);
+                const srcPl = state.placements[srcKey];
+                if (srcPl === 'transporter') {
+                    const nb = factoryNeighborColRow(src.col, src.row, getTransporterDir(srcKey));
+                    if (factoryPlacementKey(nb.col, nb.row) !== destKey) continue;
+                } else if (srcPl === 'splitter') {
+                    if (splitterTTPlanned[srcKey] !== destKey) continue;
+                } else continue;
+                const itemId = work[srcKey];
+                if (!itemId) continue;
+                if (spawnedThisTick.has(srcKey)) continue;
+                acceptedFromByDest[destKey] = srcKey;
+                break;
+            }
+        }
+
+        for (const dep of depositsWave) {
+            if (!work[dep.from]) continue;
+            delete work[dep.from];
+            invDelta[dep.itemId] = (invDelta[dep.itemId] || 0) + 1;
+            deposits.push(dep);
+        }
+
+        movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
+        for (let pass = 0; pass < movesTTCandidates.length; pass++) {
+            let progressed = false;
+            for (const m of movesTTCandidates) {
+                if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
+                const acceptedFrom = acceptedFromByDest[m.to];
+                if (acceptedFrom && acceptedFrom !== m.from) continue;
+                if (work[m.to]) continue;
+                if (!work[m.from] || work[m.from] !== m.itemId) continue;
+                claimedDest.add(m.to);
+                claimedFrom.add(m.from);
+                delete work[m.from];
+                work[m.to] = m.itemId;
+                movesTT.push(m);
+                progressed = true;
+                if (state.placements[m.from] === 'splitter' && state._splitterOptLen && state._splitterChosenIdx) {
+                    const len = state._splitterOptLen[m.from];
+                    if (len >= 2) {
+                        const idx = state._splitterChosenIdx[m.from];
+                        if (!state._splitterOutputCursor || typeof state._splitterOutputCursor !== 'object') {
+                            state._splitterOutputCursor = {};
+                        }
+                        state._splitterOutputCursor[m.from] = (idx + 1) % len;
+                    }
+                }
+                if (acceptedFromByDest[m.to] && acceptedFromByDest[m.to] === m.from) {
+                    const skipDir = skipDirForBeltMergeDest(state, m.to, getTransporterDir, getSplitterDir);
+                    let next = (((Number(cursorMap[m.to] || 0) | 0) + 4) % 4 + 1) % 4;
+                    for (let i = 0; i < 4; i++) {
+                        if (next !== skipDir) break;
+                        next = (next + 1) % 4;
+                    }
+                    cursorMap[m.to] = next;
+                }
+            }
+            if (!progressed) break;
+        }
+
+        state._ttInputCursor = cursorMap;
+    }
+
+    state._ttInputCursor = cursorMap;
+
+    const movesToEmptyCombinerCandidates = [];
+    const combinerFeeds = [];
     for (const [key, p] of Object.entries(state.placements || {})) {
         if (p !== 'transporter' && p !== 'sorter') continue;
-        // Keep extractor output on its belt cell for one full tick to maintain visible spacing.
         if (spawnedThisTick.has(key)) continue;
         const itemId = work[key];
         if (!itemId) continue;
@@ -219,85 +486,14 @@ export function simulateFactoryStep(state, deps) {
         if (!inBounds(nb.col, nb.row)) continue;
         const destKey = factoryPlacementKey(nb.col, nb.row);
         const destPl = state.placements[destKey];
-        if (destPl === 'storage') {
-            deposits.push({ from: key, to: destKey, itemId });
-        } else if (destPl === 'transporter' || destPl === 'sorter' || destPl === 'bridge') {
-            movesTTCandidates.push({ from: key, to: destKey, itemId });
-        } else if (destPl === 'combiner') {
-            if (state.combinerDiscovery && state.combinerDiscovery[destKey]) continue;
-            if (!canCombinerAcceptFrom(destKey, key, getCombinerDir)) continue;
-            if (!work[destKey]) movesToEmptyCombinerCandidates.push({ from: key, to: destKey, itemId });
-            else if (work[destKey] !== itemId) combinerFeeds.push({ from: key, to: destKey, incoming: itemId });
+        if (destPl !== 'combiner') continue;
+        if (state.combinerDiscovery && state.combinerDiscovery[destKey]) continue;
+        if (!canCombinerAcceptFrom(destKey, key, getCombinerDir)) continue;
+        if (!work[destKey]) movesToEmptyCombinerCandidates.push({ from: key, to: destKey, itemId });
+        else if (work[destKey] !== itemId) {
+            combinerFeeds.push({ from: key, to: destKey, incoming: itemId });
         }
     }
-
-    const invDelta = {};
-    for (const dep of deposits) {
-        if (!work[dep.from]) continue;
-        delete work[dep.from];
-        invDelta[dep.itemId] = (invDelta[dep.itemId] || 0) + 1;
-    }
-
-    const claimedDest = new Set();
-    const claimedFrom = new Set();
-    const acceptedFromByDest = {};
-    const conflictInputs = state._ttConflictInputs && typeof state._ttConflictInputs === 'object' ? state._ttConflictInputs : {};
-    const cursorMap = state._ttInputCursor && typeof state._ttInputCursor === 'object' ? state._ttInputCursor : {};
-    for (const destKey of Object.keys(conflictInputs)) {
-        const dirs = Array.isArray(conflictInputs[destKey]) ? conflictInputs[destKey] : [];
-        if (!dirs.length) continue;
-        const d = factoryKeyToColRow(destKey);
-        if (!Number.isFinite(d.col) || !Number.isFinite(d.row)) continue;
-        const startDir = ((Number(cursorMap[destKey] || 0) | 0) + 4) % 4;
-        const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(destKey));
-        for (let i = 0; i < 4; i++) {
-            const dir = (startDir + i) % 4;
-            if (dir === skipDir) continue;
-            if (!dirs.includes(dir)) continue;
-            const src = sourceColRowFromInputDir(d.col, d.row, dir);
-            const srcKey = factoryPlacementKey(src.col, src.row);
-            if (state.placements[srcKey] !== 'transporter') continue;
-            const nb = factoryNeighborColRow(src.col, src.row, getTransporterDir(srcKey));
-            if (factoryPlacementKey(nb.col, nb.row) !== destKey) continue;
-            const itemId = work[srcKey];
-            if (!itemId) continue;
-            if (spawnedThisTick.has(srcKey)) continue;
-            acceptedFromByDest[destKey] = srcKey;
-            break;
-        }
-    }
-
-    movesTTCandidates.sort((a, b) => a.from.localeCompare(b.from));
-    // Resolve transporter/sorter chains in multiple passes so upstream can fill
-    // a cell that becomes empty later in the same tick.
-    for (let pass = 0; pass < movesTTCandidates.length; pass++) {
-        let progressed = false;
-        for (const m of movesTTCandidates) {
-            if (claimedDest.has(m.to) || claimedFrom.has(m.from)) continue;
-            const acceptedFrom = acceptedFromByDest[m.to];
-            if (acceptedFrom && acceptedFrom !== m.from) continue;
-            if (work[m.to]) continue;
-            if (!work[m.from] || work[m.from] !== m.itemId) continue;
-            claimedDest.add(m.to);
-            claimedFrom.add(m.from);
-            delete work[m.from];
-            work[m.to] = m.itemId;
-            movesTT.push(m);
-            progressed = true;
-            // Advance accepted input direction only after successful receive into this transporter.
-            if (acceptedFromByDest[m.to] && acceptedFromByDest[m.to] === m.from) {
-                const skipDir = inputDirFromTransporterOutputDir(getTransporterDir(m.to));
-                let next = (((Number(cursorMap[m.to] || 0) | 0) + 4) % 4 + 1) % 4;
-                for (let i = 0; i < 4; i++) {
-                    if (next !== skipDir) break;
-                    next = (next + 1) % 4;
-                }
-                cursorMap[m.to] = next;
-            }
-        }
-        if (!progressed) break;
-    }
-    state._ttInputCursor = cursorMap;
 
     movesToEmptyCombinerCandidates.sort((a, b) => a.from.localeCompare(b.from));
     const tcByDest = new Map();
@@ -358,7 +554,9 @@ export function simulateFactoryStep(state, deps) {
             }
             continue;
         }
-        if (destPl !== 'transporter' && destPl !== 'sorter' && destPl !== 'bridge') continue;
+        if (destPl !== 'transporter' && destPl !== 'sorter' && destPl !== 'bridge' && destPl !== 'splitter') {
+            continue;
+        }
         if (work[destKey]) continue;
         if (!work[key] || work[key] !== itemId) continue;
         delete work[key];
@@ -387,7 +585,8 @@ export function simulateFactoryStep(state, deps) {
             if (
                 state.placements[outKey] !== 'transporter' &&
                 state.placements[outKey] !== 'sorter' &&
-                state.placements[outKey] !== 'bridge'
+                state.placements[outKey] !== 'bridge' &&
+                state.placements[outKey] !== 'splitter'
             ) {
                 continue;
             }
