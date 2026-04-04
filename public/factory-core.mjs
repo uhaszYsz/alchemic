@@ -320,7 +320,11 @@ export function simulateFactoryStep(state, deps) {
     for (const [k, v] of Object.entries(state.cellItems || {})) {
         if (typeof v === 'string' && v) work[k] = v;
     }
-    for (const k of Object.keys(state.combinerDiscovery || {})) delete work[k];
+    /** Only combiner cells use discovery; stale keys (e.g. after replacing combiner with belt) must not erase items. */
+    const placements = state.placements || {};
+    for (const k of Object.keys(state.combinerDiscovery || {})) {
+        if (placements[k] === 'combiner') delete work[k];
+    }
 
     const spawns = [];
     const spawnedThisTick = new Set();

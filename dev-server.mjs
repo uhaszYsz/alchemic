@@ -411,8 +411,15 @@ function sanitizeFactoryState(raw) {
     st.bridgeDirs = typeof raw.bridgeDirs === 'object' && raw.bridgeDirs ? raw.bridgeDirs : {};
     st.combinerDirs = typeof raw.combinerDirs === 'object' && raw.combinerDirs ? raw.combinerDirs : {};
     st.cellItems = typeof raw.cellItems === 'object' && raw.cellItems ? raw.cellItems : {};
-    st.combinerDiscovery =
-        typeof raw.combinerDiscovery === 'object' && raw.combinerDiscovery ? raw.combinerDiscovery : {};
+    {
+        const rawCd =
+            typeof raw.combinerDiscovery === 'object' && raw.combinerDiscovery ? raw.combinerDiscovery : {};
+        const cd = {};
+        for (const [k, v] of Object.entries(rawCd)) {
+            if (st.placements[k] === 'combiner' && v && typeof v === 'object') cd[k] = v;
+        }
+        st.combinerDiscovery = cd;
+    }
     st.itemSlides = typeof raw.itemSlides === 'object' && raw.itemSlides ? raw.itemSlides : {};
     st.cellRejectFlashUntil =
         typeof raw.cellRejectFlashUntil === 'object' && raw.cellRejectFlashUntil ? raw.cellRejectFlashUntil : {};

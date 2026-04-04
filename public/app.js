@@ -2680,10 +2680,16 @@ function normalizeFactoryFromServer(factory) {
     state.factory.bridgeDirs = factory.bridgeDirs && typeof factory.bridgeDirs === 'object' ? factory.bridgeDirs : {};
     state.factory.combinerDirs =
         factory.combinerDirs && typeof factory.combinerDirs === 'object' ? factory.combinerDirs : {};
-    state.factory.combinerDiscovery =
-        factory.combinerDiscovery && typeof factory.combinerDiscovery === 'object'
-            ? factory.combinerDiscovery
-            : {};
+    {
+        const rawCd =
+            factory.combinerDiscovery && typeof factory.combinerDiscovery === 'object' ? factory.combinerDiscovery : {};
+        const p = state.factory.placements;
+        const cd = {};
+        for (const [k, v] of Object.entries(rawCd)) {
+            if (p[k] === 'combiner' && v && typeof v === 'object') cd[k] = v;
+        }
+        state.factory.combinerDiscovery = cd;
+    }
     state.factory.cellItems = factory.cellItems && typeof factory.cellItems === 'object' ? factory.cellItems : {};
     state.factory.itemSlides = {};
     state.factory.cellRejectFlashUntil =
