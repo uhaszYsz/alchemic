@@ -3168,11 +3168,16 @@ function factoryRunSimTick(nowTick) {
     const elapsedMs = factoryLastSimTickAt > 0 ? slideT - factoryLastSimTickAt : targetMs;
     factoryLastSimTickAt = slideT;
     const slideDur = Math.max(16, Math.round(Math.min(targetMs * 2.25, Math.max(targetMs * 0.8, elapsedMs))));
+    /** Drop finished slides only. Do not use cellItems[toKey]: item may leave the same tick (e.g. belt→belt→combiner). */
     for (const k of Object.keys(state.factory.itemSlides)) {
         const s = state.factory.itemSlides[k];
         if (!s) continue;
-        if (state.factory.cellItems[k]) continue;
-        if (typeof s.slideItemId === 'string' && s.slideItemId) continue;
+        const rawP = (slideT - s.startT) / s.durMs;
+        if (!Number.isFinite(rawP)) {
+            delete state.factory.itemSlides[k];
+            continue;
+        }
+        if (rawP < 1) continue;
         delete state.factory.itemSlides[k];
     }
     const out = simulateFactoryStep(state.factory, {
